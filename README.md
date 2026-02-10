@@ -1,10 +1,34 @@
 # PeriodFind
 
-A collection of CUDA-accelerated periodicity detection algorithms, with both C++ and Python APIs.
+A collection of CUDA-accelerated periodicity detection algorithms, with both C++ and Python APIs. Includes a Rust-based CPU backend for environments without GPU hardware.
+
+## Algorithms
+
+- **Conditional Entropy** (`periodfind.ce` / `periodfind.cpu.ConditionalEntropy`)
+- **Analysis of Variance** (`periodfind.aov` / `periodfind.cpu.AOV`)
+- **Lomb-Scargle** (`periodfind.ls` / `periodfind.cpu.LombScargle`)
 
 ## Installing
 
-Before attempting to install, ensure that CUDA is installed, and `nvcc` is added to your `PATH` variable, or it may not be found by CMake or the Python setup file.
+### GPU backend (CUDA)
+
+Requires CUDA installed with `nvcc` on your `PATH` (or set `$CUDA_HOME`).
+
+```bash
+pip install cython numpy
+pip install -e .
+```
+
+### CPU backend (Rust)
+
+Requires a Rust toolchain and [maturin](https://github.com/PyO3/maturin):
+
+```bash
+pip install maturin
+cd rust && maturin develop --release
+```
+
+This builds the `periodfind.cpu` module using Rayon for multithreaded parallelism. No GPU needed.
 
 ### Python API
 
@@ -33,6 +57,30 @@ make
 ```
 
 Finally, install the package by running `make install` (may require super-user priveleges), which will install the library in `/usr/local/lib/` and the headers in `/usr/local/include/periodfind/` by default (on Linux, location will be different on other operating systems).
+
+## Testing
+
+Run the full test suite with pytest:
+
+```bash
+pytest tests/ -v
+```
+
+Tests are organized into three categories:
+
+- **Unit tests** (`test_periodfind.py`): Statistics, Periodogram, and utility tests (no GPU or Rust needed)
+- **CPU standalone tests** (`test_cpu_standalone.py`): Tests for the Rust CPU backend
+- **GPU integration tests** (`test_periodfind.py`): CUDA algorithm tests (auto-skipped if no GPU is available)
+
+To run only CPU tests (no GPU required):
+
+```bash
+pytest tests/test_periodfind.py tests/test_cpu_standalone.py -v
+```
+
+## CI
+
+GitHub Actions runs CPU tests automatically on every push and PR. See `.github/workflows/tests.yml`. GPU tests run on self-hosted runners when available.
 
 ## Compatibility
 
