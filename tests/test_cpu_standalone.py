@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from periodfind import Periodogram, Statistics
-from periodfind.cpu import AOV, FPW, ConditionalEntropy, LombScargle
+from periodfind.cpu import AOV, FPW, ConditionalEntropy, LombScargle, find_top_peaks_batched
 
 # ---------------------------------------------------------------------------
 # Helpers (same as test_periodfind.py)
@@ -775,4 +775,175 @@ class TestCPULargeScale:
         detected = periods[best_idx]
         assert period_matches(detected, true_period), (
             f"LS large-grid+dts: detected {detected}, expected ~{true_period}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Peak finding tests
+# ---------------------------------------------------------------------------
+
+
+class TestPeakFinding:
+    """Tests for the chunked greedy peak finder (output='peaks')."""
+
+    def test_peaks_returns_list_of_lists(self):
+        """output='peaks' should return a list of lists of Statistics."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 200, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        aov = AOV(n_phase=10)
+        result = aov.calc([t], [m], periods, period_dts, output="peaks", n_peaks=8)
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], list)
+        assert len(result[0]) <= 8
+        assert isinstance(result[0][0], Statistics)
+
+    def test_peaks_best_matches_stats(self):
+        """The best peak should match the stats output for all algorithms."""
+        true_period = 5.0
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        for name, algo, _use_max in [
+            ("CE", ConditionalEntropy(n_phase=15, n_mag=10), False),
+            ("AOV", AOV(n_phase=15), True),
+            ("LS", LombScargle(), True),
+            ("FPW", FPW(n_bins=15), True),
+        ]:
+            stats = algo.calc([t], [m], periods, period_dts, output="stats")
+            peaks = algo.calc(
+                [t], [m], periods, period_dts, output="peaks", n_peaks=32, min_distance=1
+            )
+
+            stats_period = stats[0].params[0]
+            peaks_period = peaks[0][0].params[0]
+            assert stats_period == pytest.approx(peaks_period), (
+                f"{name}: stats={stats_period}, peaks={peaks_period}"
+            )
+
+    def test_peaks_detects_known_period(self):
+        """Peak finder should find the correct period for a clean signal."""
+        true_period = 4.0
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        aov = AOV(n_phase=15)
+        peaks = aov.calc([t], [m], periods, period_dts, output="peaks", n_peaks=32, min_distance=5)
+        detected = peaks[0][0].params[0]
+        assert abs(detected - true_period) / true_period < 0.05, (
+            f"Expected ~{true_period}, got {detected}"
+        )
+
+    def test_peaks_sorted_best_first(self):
+        """Peaks should be sorted by value (best first)."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 300, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        # AOV uses maxima
+        aov = AOV(n_phase=10)
+        peaks = aov.calc([t], [m], periods, period_dts, output="peaks", n_peaks=16, min_distance=1)
+        values = [p.value for p in peaks[0]]
+        for i in range(len(values) - 1):
+            assert values[i] >= values[i + 1], "Peaks not sorted best-first"
+
+        # CE uses minima
+        ce = ConditionalEntropy(n_phase=10, n_mag=10)
+        peaks = ce.calc([t], [m], periods, period_dts, output="peaks", n_peaks=16, min_distance=1)
+        values = [p.value for p in peaks[0]]
+        for i in range(len(values) - 1):
+            assert values[i] <= values[i + 1], "CE peaks not sorted best-first (min)"
+
+    def test_peaks_n_peaks_32_default(self):
+        """Default n_peaks=32 should return up to 32 peaks."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 500, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        aov = AOV(n_phase=10)
+        peaks = aov.calc([t], [m], periods, period_dts, output="peaks")
+        assert len(peaks[0]) <= 32
+        assert len(peaks[0]) > 0
+
+    def test_peaks_min_distance(self):
+        """Larger min_distance should produce fewer, more spread out peaks."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 500, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        aov = AOV(n_phase=10)
+        peaks_close = aov.calc(
+            [t], [m], periods, period_dts, output="peaks", n_peaks=32, min_distance=1
+        )
+        peaks_far = aov.calc(
+            [t], [m], periods, period_dts, output="peaks", n_peaks=32, min_distance=20
+        )
+        assert len(peaks_far[0]) <= len(peaks_close[0])
+
+    def test_peaks_batched(self):
+        """Peak finding should work on multiple light curves."""
+        lcs = [make_sinusoidal_lightcurve(period=p, seed=i) for i, p in enumerate([2.0, 4.0, 6.0])]
+        times = [lc[0] for lc in lcs]
+        mag_list = [lc[1] for lc in lcs]
+        periods = np.linspace(1.0, 10.0, 300, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        aov = AOV(n_phase=10)
+        peaks = aov.calc(times, mag_list, periods, period_dts, output="peaks", n_peaks=32)
+        assert len(peaks) == 3
+        for curve_peaks in peaks:
+            assert len(curve_peaks) > 0
+
+    def test_peaks_with_multiple_period_dts(self):
+        """Peak finding should work with a 2D period grid."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 100, dtype=np.float32)
+        period_dts = np.array([0.0, 0.001], dtype=np.float32)
+
+        aov = AOV(n_phase=10)
+        peaks = aov.calc([t], [m], periods, period_dts, output="peaks", n_peaks=16, min_distance=1)
+        assert len(peaks[0]) > 0
+        # Each peak should have [period, period_dt] params
+        assert len(peaks[0][0].params) == 2
+
+    def test_find_top_peaks_batched_standalone(self):
+        """Standalone find_top_peaks_batched on pre-computed periodograms."""
+        t, m = make_sinusoidal_lightcurve(period=5.0, n_points=500)
+        periods = np.linspace(1.0, 10.0, 200, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        aov = AOV(n_phase=10)
+        pgrams = aov.calc([t], [m], periods, period_dts, output="periodogram")
+        data_3d = np.expand_dims(pgrams[0].data, axis=0)  # (1, n_periods, n_pdts)
+
+        idx, val = find_top_peaks_batched(data_3d, n_peaks=8, min_distance=3, use_max=True)
+        assert idx.shape == (1, 8)
+        assert val.shape == (1, 8)
+        assert idx[0, 0] >= 0  # at least one peak found
+        assert val[0, 0] >= val[0, 1]  # sorted
+
+    def test_peaks_fpw_with_errs(self):
+        """FPW peak finding should work with explicit uncertainties."""
+        true_period = 3.0
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=600, noise_std=0.05, t_span=150.0
+        )
+        errs = np.full(len(t), 0.05, dtype=np.float32)
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=15)
+        peaks = fpw.calc([t], [m], periods, period_dts, errs=[errs], output="peaks", n_peaks=32)
+        detected = peaks[0][0].params[0]
+        assert abs(detected - true_period) / true_period < 0.05, (
+            f"Expected ~{true_period}, got {detected}"
         )
