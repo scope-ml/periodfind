@@ -4,9 +4,38 @@ A collection of CUDA-accelerated periodicity detection algorithms, with both C++
 
 ## Algorithms
 
-- **Conditional Entropy** (`periodfind.ce` / `periodfind.cpu.ConditionalEntropy`)
-- **Analysis of Variance** (`periodfind.aov` / `periodfind.cpu.AOV`)
-- **Lomb-Scargle** (`periodfind.ls` / `periodfind.cpu.LombScargle`)
+| Algorithm | Unified API | GPU (CUDA) | CPU (Rust) |
+|-----------|-------------|-----------|------------|
+| Conditional Entropy | `periodfind.ConditionalEntropy` | `periodfind.gpu.ConditionalEntropy` | `periodfind.cpu.ConditionalEntropy` |
+| Analysis of Variance | `periodfind.AOV` | `periodfind.gpu.AOV` | `periodfind.cpu.AOV` |
+| Lomb-Scargle | `periodfind.LombScargle` | `periodfind.gpu.LombScargle` | `periodfind.cpu.LombScargle` |
+
+## Device API
+
+Periodfind provides a PyTorch-style device abstraction so you can write device-agnostic code. When no device is set, it auto-detects GPU availability (tries to import the CUDA extensions and runs `nvidia-smi`).
+
+```python
+import periodfind
+
+# Set the global default device
+periodfind.set_device('cpu')   # or 'gpu'
+print(periodfind.get_device()) # 'cpu'
+
+# Factory functions dispatch to the right backend
+ce  = periodfind.ConditionalEntropy(n_phase=10, n_mag=10)
+aov = periodfind.AOV(n_phase=15)
+ls  = periodfind.LombScargle()
+
+# Per-call override (ignores the global default)
+ce_gpu = periodfind.ConditionalEntropy(n_phase=10, n_mag=10, device='gpu')
+```
+
+You can still import backends directly:
+
+```python
+from periodfind.gpu import ConditionalEntropy  # CUDA backend
+from periodfind.cpu import ConditionalEntropy  # Rust CPU backend
+```
 
 ## Installing
 

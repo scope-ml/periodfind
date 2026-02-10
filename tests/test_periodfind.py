@@ -18,9 +18,9 @@ from periodfind._utils import prepare_magnitudes, validate_inputs, ensure_float3
 # Try importing CUDA-backed modules; skip GPU tests if unavailable
 HAS_GPU = False
 try:
-    from periodfind.ce import ConditionalEntropy
-    from periodfind.aov import AOV
-    from periodfind.ls import LombScargle
+    from periodfind.gpu import ConditionalEntropy
+    from periodfind.gpu import AOV
+    from periodfind.gpu import LombScargle
     # Verify an actual GPU is reachable by doing a trivial CUDA operation
     import subprocess
     ret = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
@@ -282,6 +282,138 @@ class TestPeriodogram:
         best = p.best_params(n=1, significance_type='madmedian')
         assert best.significance_type == 'madmedian'
         assert best.significance > 0
+
+
+# ---------------------------------------------------------------------------
+# Device API unit tests
+# ---------------------------------------------------------------------------
+
+class TestDeviceAPI:
+    """Tests for the PyTorch-style device abstraction (set_device / get_device / factories)."""
+
+    def setup_method(self):
+        """Reset global device state before each test."""
+        import periodfind
+        periodfind._default_device = None
+
+    def teardown_method(self):
+        """Reset global device state after each test."""
+        import periodfind
+        periodfind._default_device = None
+
+    def test_set_device_cpu(self):
+        import periodfind
+        periodfind.set_device('cpu')
+        assert periodfind.get_device() == 'cpu'
+
+    def test_set_device_gpu(self):
+        import periodfind
+        periodfind.set_device('gpu')
+        assert periodfind.get_device() == 'gpu'
+
+    def test_set_device_case_insensitive(self):
+        import periodfind
+        periodfind.set_device('CPU')
+        assert periodfind.get_device() == 'cpu'
+        periodfind.set_device('Gpu')
+        assert periodfind.get_device() == 'gpu'
+
+    def test_set_device_invalid_raises(self):
+        import periodfind
+        with pytest.raises(ValueError, match="Unknown device"):
+            periodfind.set_device('tpu')
+
+    def test_resolve_device_explicit(self):
+        import periodfind
+        assert periodfind._resolve_device('cpu') == 'cpu'
+        assert periodfind._resolve_device('gpu') == 'gpu'
+        assert periodfind._resolve_device('CPU') == 'cpu'
+
+    def test_resolve_device_invalid_raises(self):
+        import periodfind
+        with pytest.raises(ValueError, match="Unknown device"):
+            periodfind._resolve_device('tpu')
+
+    def test_resolve_device_uses_global(self):
+        import periodfind
+        periodfind.set_device('cpu')
+        assert periodfind._resolve_device() == 'cpu'
+
+    def test_factory_cpu(self):
+        """Factory functions with device='cpu' should return CPU backend instances."""
+        import periodfind
+        from periodfind.cpu import (
+            ConditionalEntropy as CpuCE,
+            AOV as CpuAOV,
+            LombScargle as CpuLS,
+        )
+        ce = periodfind.ConditionalEntropy(n_phase=10, n_mag=10, device='cpu')
+        aov = periodfind.AOV(n_phase=10, device='cpu')
+        ls = periodfind.LombScargle(device='cpu')
+        assert isinstance(ce, CpuCE)
+        assert isinstance(aov, CpuAOV)
+        assert isinstance(ls, CpuLS)
+
+    def test_factory_uses_global_device(self):
+        """Factory functions should use the global default when no device= given."""
+        import periodfind
+        from periodfind.cpu import ConditionalEntropy as CpuCE
+        periodfind.set_device('cpu')
+        ce = periodfind.ConditionalEntropy(n_phase=10, n_mag=10)
+        assert isinstance(ce, CpuCE)
+
+    def test_factory_override_beats_global(self):
+        """Per-call device= should override the global default."""
+        import periodfind
+        from periodfind.cpu import ConditionalEntropy as CpuCE
+        periodfind.set_device('gpu')  # global says gpu
+        ce = periodfind.ConditionalEntropy(n_phase=10, n_mag=10, device='cpu')
+        assert isinstance(ce, CpuCE)
+
+    @requires_gpu
+    def test_factory_gpu(self):
+        """Factory functions with device='gpu' should return GPU backend instances."""
+        import periodfind
+        from periodfind.gpu import (
+            ConditionalEntropy as GpuCE,
+            AOV as GpuAOV,
+            LombScargle as GpuLS,
+        )
+        ce = periodfind.ConditionalEntropy(n_phase=10, n_mag=10, device='gpu')
+        aov = periodfind.AOV(n_phase=10, device='gpu')
+        ls = periodfind.LombScargle(device='gpu')
+        assert isinstance(ce, GpuCE)
+        assert isinstance(aov, GpuAOV)
+        assert isinstance(ls, GpuLS)
+
+    def test_factory_forwards_kwargs(self):
+        """Factory should forward constructor kwargs to backend class."""
+        import periodfind
+        periodfind.set_device('cpu')
+        ce = periodfind.ConditionalEntropy(n_phase=20, n_mag=5,
+                                           phase_bin_extent=2, mag_bin_extent=3)
+        assert ce.n_phase == 20
+        assert ce.n_mag == 5
+        assert ce.phase_bin_extent == 2
+        assert ce.mag_bin_extent == 3
+
+    def test_factory_ce_cpu_runs(self):
+        """CPU ConditionalEntropy via factory should produce valid results."""
+        import periodfind
+        periodfind.set_device('cpu')
+        ce = periodfind.ConditionalEntropy(n_phase=10, n_mag=10)
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 50, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+        result = ce.calc([t], [m], periods, period_dts, output='stats')
+        assert isinstance(result[0], Statistics)
+
+    def test_auto_detect_returns_valid_device(self):
+        """Auto-detect (no explicit device) should return 'cpu' or 'gpu'."""
+        import periodfind
+        periodfind._default_device = None
+        device = periodfind.get_device()
+        assert device in ('cpu', 'gpu')
 
 
 # ---------------------------------------------------------------------------

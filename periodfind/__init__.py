@@ -1,4 +1,5 @@
 import numpy as np
+import subprocess
 
 # Copyright 2020 California Institute of Technology. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
@@ -7,7 +8,116 @@ import numpy as np
 
 """
 Provides an API for analyzing light curves using periodograms.
+
+Supports a PyTorch-style device abstraction for transparent CPU/GPU dispatch::
+
+    import periodfind
+
+    periodfind.set_device('cpu')       # or 'gpu'
+    ce = periodfind.ConditionalEntropy(n_phase=10, n_mag=10)
+
+    # Per-call override
+    ce_gpu = periodfind.ConditionalEntropy(n_phase=10, n_mag=10, device='gpu')
 """
+
+# ---------------------------------------------------------------------------
+# Device management
+# ---------------------------------------------------------------------------
+
+_default_device = None  # None means auto-detect
+
+
+def _resolve_device(device=None):
+    """Return ``'cpu'`` or ``'gpu'`` after resolving *device*.
+
+    Resolution order:
+    1. Explicit *device* argument (if not None).
+    2. Global default set via :func:`set_device`.
+    3. Auto-detect: try importing the CUDA extensions **and** running
+       ``nvidia-smi``; fall back to ``'cpu'``.
+    """
+    if device is not None:
+        device = device.lower()
+        if device not in ('cpu', 'gpu'):
+            raise ValueError(
+                f"Unknown device '{device}'. Choose 'cpu' or 'gpu'.")
+        return device
+
+    global _default_device
+    if _default_device is not None:
+        return _default_device
+
+    # Auto-detect
+    try:
+        import periodfind.ce  # noqa: F401
+        ret = subprocess.run(
+            ["nvidia-smi"], capture_output=True, timeout=5)
+        if ret.returncode == 0:
+            return 'gpu'
+    except (ImportError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return 'cpu'
+
+
+def set_device(device):
+    """Set the global default device to ``'cpu'`` or ``'gpu'``."""
+    device = device.lower()
+    if device not in ('cpu', 'gpu'):
+        raise ValueError(
+            f"Unknown device '{device}'. Choose 'cpu' or 'gpu'.")
+    global _default_device
+    _default_device = device
+
+
+def get_device():
+    """Return the current effective device (``'cpu'`` or ``'gpu'``)."""
+    return _resolve_device()
+
+
+# ---------------------------------------------------------------------------
+# Factory functions
+# ---------------------------------------------------------------------------
+
+def ConditionalEntropy(**kwargs):
+    """Create a Conditional Entropy algorithm on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop('device', None))
+    if device == 'gpu':
+        from periodfind.gpu import ConditionalEntropy as _Cls
+    else:
+        from periodfind.cpu import ConditionalEntropy as _Cls
+    return _Cls(**kwargs)
+
+
+def AOV(**kwargs):
+    """Create an Analysis of Variance algorithm on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop('device', None))
+    if device == 'gpu':
+        from periodfind.gpu import AOV as _Cls
+    else:
+        from periodfind.cpu import AOV as _Cls
+    return _Cls(**kwargs)
+
+
+def LombScargle(**kwargs):
+    """Create a Lomb-Scargle algorithm on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop('device', None))
+    if device == 'gpu':
+        from periodfind.gpu import LombScargle as _Cls
+    else:
+        from periodfind.cpu import LombScargle as _Cls
+    return _Cls(**kwargs)
 
 class Statistics:
     """Stores statistics about a single set of parameters.

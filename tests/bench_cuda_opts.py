@@ -27,9 +27,9 @@ import numpy as np
 def check_gpu():
     """Return True if CUDA extensions load and nvidia-smi succeeds."""
     try:
-        from periodfind.ce import ConditionalEntropy  # noqa: F401
-        from periodfind.aov import AOV                # noqa: F401
-        from periodfind.ls import LombScargle         # noqa: F401
+        from periodfind.gpu import ConditionalEntropy  # noqa: F401
+        from periodfind.gpu import AOV                 # noqa: F401
+        from periodfind.gpu import LombScargle         # noqa: F401
     except ImportError as exc:
         print(f"ERROR: Could not import CUDA extensions: {exc}")
         print("Build the package with CUDA support first.")
@@ -149,9 +149,9 @@ def build_algorithms():
 
     Returns a list of (name, algo_instance, use_max) tuples.
     """
-    from periodfind.ce import ConditionalEntropy
-    from periodfind.aov import AOV
-    from periodfind.ls import LombScargle
+    from periodfind.gpu import ConditionalEntropy
+    from periodfind.gpu import AOV
+    from periodfind.gpu import LombScargle
 
     return [
         ("CE",  ConditionalEntropy(n_phase=10, n_mag=10), False),

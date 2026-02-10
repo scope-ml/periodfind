@@ -13,9 +13,9 @@ import subprocess
 # Check GPU availability
 HAS_GPU = False
 try:
-    from periodfind.ce import ConditionalEntropy as CudaCE
-    from periodfind.aov import AOV as CudaAOV
-    from periodfind.ls import LombScargle as CudaLS
+    from periodfind.gpu import ConditionalEntropy as CudaCE
+    from periodfind.gpu import AOV as CudaAOV
+    from periodfind.gpu import LombScargle as CudaLS
     ret = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
     if ret.returncode == 0:
         HAS_GPU = True
