@@ -12,7 +12,7 @@ import warnings
 
 from periodfind import Statistics, Periodogram
 from periodfind._utils import prepare_magnitudes, validate_inputs, ensure_float32
-from periodfind.cpu import ConditionalEntropy, AOV, LombScargle
+from periodfind.cpu import ConditionalEntropy, AOV, LombScargle, FPW
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +374,165 @@ class TestCPULombScargle:
 
 
 # ---------------------------------------------------------------------------
+# FPW tests
+# ---------------------------------------------------------------------------
+
+class TestCPUFPW:
+    def test_basic_stats_output(self):
+        """FPW should return Statistics objects."""
+        t, m = make_sinusoidal_lightcurve(period=2.5)
+        periods = make_trial_periods(2.5)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=10)
+        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], Statistics)
+        assert result[0].significance > 0
+
+    def test_detects_known_period(self):
+        """FPW should find the correct period for a clean sinusoidal signal."""
+        true_period = 5.0
+        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=800,
+                                           noise_std=0.02, t_span=200.0)
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=20)
+        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+
+        detected = result[0].params[0]
+        assert abs(detected - true_period) / true_period < 0.05, \
+            f"Expected ~{true_period}, got {detected}"
+
+    def test_with_uncertainties(self):
+        """FPW with explicit uncertainties should detect the period."""
+        true_period = 3.0
+        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=600,
+                                           noise_std=0.05, t_span=150.0)
+        errs = np.full(len(t), 0.05, dtype=np.float32)
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=15)
+        result = fpw.calc([t], [m], periods, period_dts, errs=[errs],
+                          output='stats')
+
+        detected = result[0].params[0]
+        assert abs(detected - true_period) / true_period < 0.05, \
+            f"Expected ~{true_period}, got {detected}"
+
+    def test_without_uncertainties(self):
+        """FPW without uncertainties (uniform weights) should still work."""
+        true_period = 2.0
+        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=500,
+                                           noise_std=0.03, t_span=100.0)
+        periods = make_trial_periods(true_period, n_periods=400)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=10)
+        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+
+        detected = result[0].params[0]
+        assert abs(detected - true_period) / true_period < 0.05, \
+            f"Expected ~{true_period}, got {detected}"
+
+    def test_periodogram_output(self):
+        """FPW periodogram should have correct shape and use maxima."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 100, dtype=np.float32)
+        period_dts = np.array([0.0, 0.001], dtype=np.float32)
+
+        fpw = FPW(n_bins=10)
+        result = fpw.calc([t], [m], periods, period_dts, output='periodogram')
+
+        pgram = result[0]
+        assert isinstance(pgram, Periodogram)
+        assert pgram.data.shape == (100, 2)
+        assert pgram.use_max is True
+
+    def test_multiple_lightcurves(self):
+        """FPW should handle batched light curves."""
+        lcs = [make_sinusoidal_lightcurve(period=p, seed=i)
+               for i, p in enumerate([2.0, 4.0, 6.0])]
+        times = [lc[0] for lc in lcs]
+        mag_list = [lc[1] for lc in lcs]
+        periods = np.linspace(1.0, 10.0, 300, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=15)
+        result = fpw.calc(times, mag_list, periods, period_dts, output='stats')
+        assert len(result) == 3
+
+    def test_n_stats_multiple(self):
+        """Requesting n_stats > 1 should return a list of Statistics."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 200, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=10)
+        result = fpw.calc([t], [m], periods, period_dts,
+                          output='stats', n_stats=5)
+        assert isinstance(result[0], list)
+        assert len(result[0]) == 5
+
+    def test_mismatched_errs_raises(self):
+        """Mismatched errs list length should raise ValueError."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        errs = np.ones(len(t), dtype=np.float32)
+        periods = np.linspace(1.0, 10.0, 50, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW()
+        with pytest.raises(ValueError):
+            fpw.calc([t, t], [m, m], periods, period_dts, errs=[errs])
+
+    def test_float64_errs_raises(self):
+        """Passing float64 errs should raise TypeError."""
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        errs = np.ones(len(t), dtype=np.float64)
+        periods = np.linspace(1.0, 10.0, 50, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW()
+        with pytest.raises(TypeError, match="expected float32"):
+            fpw.calc([t], [m], periods, period_dts, errs=[errs])
+
+    def test_variable_uncertainties(self):
+        """FPW with non-uniform uncertainties should still find period."""
+        true_period = 4.0
+        rng = np.random.default_rng(42)
+        n_points = 800
+        times = np.sort(rng.uniform(0, 200, n_points)).astype(np.float32)
+        errs = rng.uniform(0.01, 0.2, n_points).astype(np.float32)
+        noise = (rng.normal(0, 1, n_points) * errs).astype(np.float32)
+        mags = (np.sin(2 * np.pi * times / true_period) + noise).astype(np.float32)
+
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        fpw = FPW(n_bins=20)
+        result = fpw.calc([times], [mags], periods, period_dts, errs=[errs],
+                          output='stats')
+
+        detected = result[0].params[0]
+        assert abs(detected - true_period) / true_period < 0.05, \
+            f"Expected ~{true_period}, got {detected}"
+
+    def test_factory_function(self):
+        """periodfind.FPW() factory should produce a working FPW object."""
+        import periodfind
+        fpw = periodfind.FPW(n_bins=10, device='cpu')
+        t, m = make_sinusoidal_lightcurve(period=3.0)
+        periods = np.linspace(1.0, 10.0, 100, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+        assert isinstance(result[0], Statistics)
+
+
+# ---------------------------------------------------------------------------
 # Cross-algorithm consistency tests
 # ---------------------------------------------------------------------------
 
@@ -389,13 +548,16 @@ class TestCPUCrossAlgorithm:
         ce = ConditionalEntropy(n_phase=15, n_mag=10)
         aov = AOV(n_phase=15)
         ls_algo = LombScargle()
+        fpw = FPW(n_bins=15)
 
         ce_result = ce.calc([t], [m], periods, period_dts, output='stats')
         aov_result = aov.calc([t], [m], periods, period_dts, output='stats')
         ls_result = ls_algo.calc([t], [m], periods, period_dts, output='stats')
+        fpw_result = fpw.calc([t], [m], periods, period_dts, output='stats')
 
         tol = 0.05
-        for name, res in [("CE", ce_result), ("AOV", aov_result), ("LS", ls_result)]:
+        for name, res in [("CE", ce_result), ("AOV", aov_result),
+                          ("LS", ls_result), ("FPW", fpw_result)]:
             detected = res[0].params[0]
             assert abs(detected - true_period) / true_period < tol, \
                 f"{name} detected {detected}, expected ~{true_period}"

@@ -119,6 +119,21 @@ def LombScargle(**kwargs):
         from periodfind.cpu import LombScargle as _Cls
     return _Cls(**kwargs)
 
+
+def FPW(**kwargs):
+    """Create a Fast Phase-folding Weighted algorithm on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop('device', None))
+    if device == 'gpu':
+        from periodfind.gpu import FPW as _Cls
+    else:
+        from periodfind.cpu import FPW as _Cls
+    return _Cls(**kwargs)
+
+
 class Statistics:
     """Stores statistics about a single set of parameters.
 

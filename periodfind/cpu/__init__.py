@@ -7,7 +7,7 @@ ls.pyx), but uses a Rust+Rayon backend that runs on the CPU.
 import numpy as np
 from periodfind import Statistics, Periodogram
 from periodfind._utils import prepare_magnitudes, validate_inputs, ensure_float32
-from periodfind_cpu import calc_ce_batched, calc_aov_batched, calc_ls_batched
+from periodfind_cpu import calc_ce_batched, calc_aov_batched, calc_ls_batched, calc_fpw_batched
 
 
 class ConditionalEntropy:
@@ -232,6 +232,99 @@ class LombScargle:
         elif output == 'periodogram':
             return [Periodogram(data, [periods, period_dts], True)
                     for data in ls_ndarr]
+        else:
+            raise NotImplementedError(
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats" or "periodogram".')
+
+
+class FPW:
+    """Fast Phase-folding Weighted (FPW) light curve analysis (CPU backend).
+
+    Computes the FPW statistic (Finkbeiner et al. 2025), a weighted
+    chi-squared reduction that supports per-point uncertainties.
+
+    Parameters
+    ----------
+    n_bins : int, default=10
+        The number of phase bins.
+    """
+
+    def __init__(self, n_bins=10):
+        self.n_bins = n_bins
+
+    def calc(self, times, mags, periods, period_dts,
+             errs=None, output="stats", normalize=False, center=False,
+             n_stats=1, significance_type='stdmean'):
+        """Runs FPW calculations on a list of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray
+            List of light curve times.
+        mags : list of ndarray
+            List of light curve magnitudes.
+        periods : ndarray
+            Array of trial periods (float32).
+        period_dts : ndarray
+            Array of trial period time derivatives (float32).
+        errs : list of ndarray or None, default=None
+            List of per-point uncertainties (standard deviations).
+            If None, uniform uncertainties of 1.0 are assumed.
+        output : {'stats', 'periodogram'}, default='stats'
+            Type of output to return.
+        normalize : bool, default=False
+            Unused (accepted for API consistency).
+        center : bool, default=False
+            Unused (accepted for API consistency).
+        n_stats : int, default=1
+            Number of top Statistics to return.
+        significance_type : {'stdmean', 'madmedian'}, default='stdmean'
+            Significance metric.
+
+        Returns
+        -------
+        list of Statistics or list of Periodogram
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, 'times')
+        ensure_float32(mags, 'mags')
+
+        # Handle uncertainties
+        if errs is None:
+            errs = [np.ones(len(t), dtype=np.float32) for t in times]
+        else:
+            ensure_float32(errs, 'errs')
+            if len(errs) != len(times):
+                raise ValueError(
+                    f"errs must have the same number of arrays as times, "
+                    f"got {len(errs)} and {len(times)}")
+            for i, (e, t) in enumerate(zip(errs, times)):
+                if len(e) != len(t):
+                    raise ValueError(
+                        f"errs[{i}] and times[{i}] have different lengths: "
+                        f"{len(e)} vs {len(t)}")
+
+        fpw_ndarr = calc_fpw_batched(
+            times, mags, errs, periods, period_dts,
+            self.n_bins,
+        )
+
+        if output == 'stats':
+            all_stats = []
+            for i in range(len(times)):
+                stats = Statistics.statistics_from_data(
+                    fpw_ndarr[i],
+                    [periods, period_dts],
+                    True,
+                    n=n_stats,
+                    significance_type=significance_type,
+                )
+                all_stats.append(stats)
+            return all_stats
+        elif output == 'periodogram':
+            return [Periodogram(data, [periods, period_dts], True)
+                    for data in fpw_ndarr]
         else:
             raise NotImplementedError(
                 f'Output type "{output}" is not implemented. '

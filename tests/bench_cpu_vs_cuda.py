@@ -17,6 +17,7 @@ try:
     from periodfind.gpu import ConditionalEntropy as CudaCE
     from periodfind.gpu import AOV as CudaAOV
     from periodfind.gpu import LombScargle as CudaLS
+    from periodfind.gpu import FPW as CudaFPW
     ret = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
     if ret.returncode == 0:
         HAS_GPU = True
@@ -27,6 +28,7 @@ from periodfind.cpu import (
     ConditionalEntropy as CpuCE,
     AOV as CpuAOV,
     LombScargle as CpuLS,
+    FPW as CpuFPW,
 )
 
 
@@ -36,7 +38,8 @@ def make_lightcurve(n_points=500, period=5.0, seed=42):
     phase = 2.0 * np.pi * times / period
     mags = (np.sin(phase) + 1.0).astype(np.float32)
     mags += rng.normal(0, 0.05, n_points).astype(np.float32)
-    return times, mags
+    errs = np.full(n_points, 0.05, dtype=np.float32)
+    return times, mags, errs
 
 
 def bench(fn, warmup=1, repeats=3):
@@ -59,9 +62,10 @@ WORKLOADS = [
 ]
 
 ALGORITHMS = [
-    ("CE",  CpuCE,  (CudaCE if HAS_GPU else None),  {"n_phase": 10, "n_mag": 10}),
-    ("AOV", CpuAOV, (CudaAOV if HAS_GPU else None),  {"n_phase": 10}),
-    ("LS",  CpuLS,  (CudaLS if HAS_GPU else None),   {}),
+    ("CE",  CpuCE,  (CudaCE if HAS_GPU else None),  {"n_phase": 10, "n_mag": 10}, False),
+    ("AOV", CpuAOV, (CudaAOV if HAS_GPU else None),  {"n_phase": 10},              False),
+    ("LS",  CpuLS,  (CudaLS if HAS_GPU else None),   {},                            False),
+    ("FPW", CpuFPW, (CudaFPW if HAS_GPU else None),  {"n_bins": 10},               True),
 ]
 
 
@@ -73,7 +77,7 @@ def main():
     print(header)
     print(sep)
 
-    for algo_name, CpuCls, CudaCls, kwargs in ALGORITHMS:
+    for algo_name, CpuCls, CudaCls, kwargs, needs_errs in ALGORITHMS:
         cpu_algo = CpuCls(**kwargs)
         cuda_algo = CudaCls(**kwargs) if CudaCls else None
 
@@ -81,22 +85,28 @@ def main():
             # Generate data
             times_list = []
             mags_list = []
+            errs_list = []
             for i in range(n_curves):
-                t, m = make_lightcurve(n_points=500, period=5.0, seed=i)
+                t, m, e = make_lightcurve(n_points=500, period=5.0, seed=i)
                 times_list.append(t)
                 mags_list.append(m)
+                errs_list.append(e)
 
             periods = np.linspace(1.0, 10.0, n_periods, dtype=np.float32)
             period_dts = np.linspace(-0.001, 0.001, n_pdts, dtype=np.float32)
 
+            extra = {"errs": errs_list} if needs_errs else {}
+
             # CPU benchmark
             cpu_ms = bench(lambda: cpu_algo.calc(
-                times_list, mags_list, periods, period_dts, output='stats'))
+                times_list, mags_list, periods, period_dts,
+                output='stats', **extra))
 
             # CUDA benchmark
             if cuda_algo:
                 cuda_ms = bench(lambda: cuda_algo.calc(
-                    times_list, mags_list, periods, period_dts, output='stats'))
+                    times_list, mags_list, periods, period_dts,
+                    output='stats', **extra))
                 speedup = cpu_ms / cuda_ms
                 cuda_str = f"{cuda_ms:10.1f}"
                 speedup_str = f"{speedup:7.1f}x"
