@@ -134,6 +134,29 @@ def FPW(**kwargs):
     return _Cls(**kwargs)
 
 
+def FourierDecomposition(**kwargs):
+    """Create a Fourier decomposition feature extractor.
+
+    CPU-only for now.  If ``device='gpu'`` is requested, falls back to
+    CPU with a warning.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    import warnings
+
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        warnings.warn(
+            "FourierDecomposition does not have a GPU backend; falling back to CPU.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    from periodfind.cpu import FourierDecomposition as _Cls
+
+    return _Cls(**kwargs)
+
+
 class Statistics:
     """Stores statistics about a single set of parameters.
 

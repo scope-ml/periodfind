@@ -5,7 +5,13 @@ ls.pyx), but uses a Rust+Rayon backend that runs on the CPU.
 """
 
 import numpy as np
-from periodfind_cpu import calc_aov_batched, calc_ce_batched, calc_fpw_batched, calc_ls_batched
+from periodfind_cpu import (
+    calc_aov_batched,
+    calc_ce_batched,
+    calc_fourier_batched,
+    calc_fpw_batched,
+    calc_ls_batched,
+)
 
 from periodfind import Periodogram, Statistics
 from periodfind._utils import ensure_float32, prepare_magnitudes, validate_inputs
@@ -380,3 +386,58 @@ class FPW:
             raise NotImplementedError(
                 f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
             )
+
+
+class FourierDecomposition:
+    """Fourier decomposition via weighted linear least-squares (CPU backend).
+
+    Computes Fourier features for light curves given pre-determined periods.
+    Uses BIC model selection over 0–5 harmonics.
+
+    Returns 14 features per curve:
+        [power, BIC, offset, slope, A1, B1, A2, B2, A3, B3, A4, B4, A5, B5]
+    """
+
+    def calc(self, times, mags, errs, periods):
+        """Run Fourier decomposition on a list of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray
+            List of light curve times (float32).
+        mags : list of ndarray
+            List of light curve magnitudes (float32).
+        errs : list of ndarray
+            List of per-point uncertainties (float32).
+        periods : ndarray
+            Array of periods, one per curve (float32).
+
+        Returns
+        -------
+        ndarray of shape (n_curves, 14)
+            Fourier features for each curve.
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+        ensure_float32(errs, "errs")
+
+        if len(errs) != len(times):
+            raise ValueError(
+                f"errs must have the same number of arrays as times, "
+                f"got {len(errs)} and {len(times)}"
+            )
+        for i, (e, t) in enumerate(zip(errs, times)):
+            if len(e) != len(t):
+                raise ValueError(
+                    f"errs[{i}] and times[{i}] have different lengths: {len(e)} vs {len(t)}"
+                )
+
+        periods = np.asarray(periods, dtype=np.float32)
+        if periods.ndim != 1 or len(periods) != len(times):
+            raise ValueError(
+                f"periods must be a 1D array with one entry per curve, "
+                f"got shape {periods.shape} for {len(times)} curves"
+            )
+
+        return calc_fourier_batched(times, mags, errs, periods)

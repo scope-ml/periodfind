@@ -4,11 +4,22 @@ A collection of CUDA-accelerated periodicity detection algorithms, with both C++
 
 ## Algorithms
 
+### Period-Finding
+
 | Algorithm | Unified API | GPU (CUDA) | CPU (Rust) |
 |-----------|-------------|-----------|------------|
 | Conditional Entropy | `periodfind.ConditionalEntropy` | `periodfind.gpu.ConditionalEntropy` | `periodfind.cpu.ConditionalEntropy` |
 | Analysis of Variance | `periodfind.AOV` | `periodfind.gpu.AOV` | `periodfind.cpu.AOV` |
 | Lomb-Scargle | `periodfind.LombScargle` | `periodfind.gpu.LombScargle` | `periodfind.cpu.LombScargle` |
+| Fast Phase-folding Weighted | `periodfind.FPW` | `periodfind.gpu.FPW` | `periodfind.cpu.FPW` |
+
+### Feature Extraction
+
+| Algorithm | Unified API | CPU (Rust) |
+|-----------|-------------|------------|
+| Fourier Decomposition | `periodfind.FourierDecomposition` | `periodfind.cpu.FourierDecomposition` |
+
+Fourier decomposition computes weighted linear least-squares Fourier fits with BIC model selection (0-5 harmonics) for a batch of light curves given pre-determined periods. Returns 14 features per curve: `[power, BIC, offset, slope, A1, B1, A2, B2, A3, B3, A4, B4, A5, B5]`. This replaces the per-source `scipy.optimize.curve_fit` approach with a direct Cholesky solve, giving identical results orders of magnitude faster.
 
 ## Device API
 
@@ -25,6 +36,8 @@ print(periodfind.get_device()) # 'cpu'
 ce  = periodfind.ConditionalEntropy(n_phase=10, n_mag=10)
 aov = periodfind.AOV(n_phase=15)
 ls  = periodfind.LombScargle()
+fpw = periodfind.FPW(n_bins=10)
+fd  = periodfind.FourierDecomposition()  # CPU-only for now
 
 # Per-call override (ignores the global default)
 ce_gpu = periodfind.ConditionalEntropy(n_phase=10, n_mag=10, device='gpu')
@@ -35,6 +48,21 @@ You can still import backends directly:
 ```python
 from periodfind.gpu import ConditionalEntropy  # CUDA backend
 from periodfind.cpu import ConditionalEntropy  # Rust CPU backend
+from periodfind.cpu import FourierDecomposition  # Rust CPU only
+```
+
+### Fourier Decomposition Usage
+
+```python
+import numpy as np
+import periodfind
+
+fd = periodfind.FourierDecomposition()
+
+# times, mags, errs: lists of float32 arrays (one per light curve)
+# periods: float32 array with one period per curve
+features = fd.calc(times, mags, errs, periods)
+# features.shape == (n_curves, 14)
 ```
 
 ## Installing
@@ -95,16 +123,17 @@ Run the full test suite with pytest:
 pytest tests/ -v
 ```
 
-Tests are organized into three categories:
+Tests are organized into four categories:
 
 - **Unit tests** (`test_periodfind.py`): Statistics, Periodogram, and utility tests (no GPU or Rust needed)
-- **CPU standalone tests** (`test_cpu_standalone.py`): Tests for the Rust CPU backend
-- **GPU integration tests** (`test_periodfind.py`): CUDA algorithm tests (auto-skipped if no GPU is available)
+- **CPU standalone tests** (`test_cpu_standalone.py`): Tests for the Rust CPU backend (period-finding algorithms)
+- **Fourier tests** (`test_fourier.py`): Tests for Fourier decomposition (output shape, known signal recovery, edge cases, input validation)
+- **GPU integration tests** (`test_cpu_vs_cuda.py`): CUDA algorithm tests (auto-skipped if no GPU is available)
 
 To run only CPU tests (no GPU required):
 
 ```bash
-pytest tests/test_periodfind.py tests/test_cpu_standalone.py -v
+pytest tests/test_periodfind.py tests/test_cpu_standalone.py tests/test_fourier.py -v
 ```
 
 ## CI
