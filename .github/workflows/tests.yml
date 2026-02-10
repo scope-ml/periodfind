@@ -30,6 +30,12 @@ jobs:
           . .venv/bin/activate
           pip install numpy cython pytest maturin
 
+      - name: Run Rust unit tests
+        working-directory: rust
+        run: |
+          . ../.venv/bin/activate
+          cargo test
+
       - name: Build Rust CPU backend
         working-directory: rust
         run: |
@@ -39,7 +45,7 @@ jobs:
       - name: Run unit and CPU tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_periodfind.py tests/test_cpu_standalone.py -v
+          pytest tests/test_periodfind.py tests/test_cpu_standalone.py tests/test_fourier.py tests/test_batch_features.py -v
 
   # cuda-tests:
   #   runs-on: [self-hosted, gpu]
