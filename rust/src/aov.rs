@@ -1,7 +1,6 @@
 /// Analysis of Variance algorithm — CPU implementation matching CUDA kernels.
 ///
 /// Translates FoldBinKernel + AOVKernel from aov.cu.
-
 use rayon::prelude::*;
 
 use crate::fold;

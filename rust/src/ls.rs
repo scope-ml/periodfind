@@ -1,7 +1,6 @@
 /// Lomb-Scargle algorithm — CPU implementation matching CUDA kernel.
 ///
 /// Translates LombScargleKernel from ls.cu.
-
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
@@ -13,12 +12,7 @@ const TWO_PI: f32 = 2.0 * PI;
 /// (period, period_dt) pairs.
 ///
 /// Returns a flat Vec<f32> of length n_periods * n_pdts.
-pub fn calc_ls(
-    times: &[f32],
-    mags: &[f32],
-    periods: &[f32],
-    period_dts: &[f32],
-) -> Vec<f32> {
+pub fn calc_ls(times: &[f32], mags: &[f32], periods: &[f32], period_dts: &[f32]) -> Vec<f32> {
     let n_periods = periods.len();
     let n_pdts = period_dts.len();
     let length = times.len();
@@ -70,8 +64,7 @@ pub fn calc_ls(
             let den_l = cos_tau * cos_tau * cos_cos
                 + 2.0 * cos_tau * sin_tau * cos_sin
                 + sin_tau * sin_tau * sin_sin;
-            let den_r = cos_tau * cos_tau * sin_sin
-                - 2.0 * cos_tau * sin_tau * cos_sin
+            let den_r = cos_tau * cos_tau * sin_sin - 2.0 * cos_tau * sin_tau * cos_sin
                 + sin_tau * sin_tau * cos_cos;
 
             if den_l == 0.0 || den_r == 0.0 {

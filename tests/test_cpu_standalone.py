@@ -6,21 +6,22 @@ the periodfind.cpu backend so no GPU is required.
 Run with: pytest tests/test_cpu_standalone.py -v
 """
 
-import numpy as np
-import pytest
 import warnings
 
-from periodfind import Statistics, Periodogram
-from periodfind._utils import prepare_magnitudes, validate_inputs, ensure_float32
-from periodfind.cpu import ConditionalEntropy, AOV, LombScargle, FPW
+import numpy as np
+import pytest
 
+from periodfind import Periodogram, Statistics
+from periodfind.cpu import AOV, FPW, ConditionalEntropy, LombScargle
 
 # ---------------------------------------------------------------------------
 # Helpers (same as test_periodfind.py)
 # ---------------------------------------------------------------------------
 
-def make_sinusoidal_lightcurve(period, n_points=500, amplitude=1.0,
-                                noise_std=0.05, t_span=100.0, seed=42):
+
+def make_sinusoidal_lightcurve(
+    period, n_points=500, amplitude=1.0, noise_std=0.05, t_span=100.0, seed=42
+):
     """Generate a synthetic sinusoidal light curve with known period."""
     rng = np.random.default_rng(seed)
     times = np.sort(rng.uniform(0, t_span, n_points)).astype(np.float32)
@@ -37,9 +38,15 @@ def make_trial_periods(true_period, n_periods=200, margin=0.5):
     return np.linspace(lo, hi, n_periods, dtype=np.float32)
 
 
-def make_eclipsing_binary(period, n_points=500, eclipse_depth=0.5,
-                          eclipse_width=0.1, noise_std=0.02,
-                          t_span=200.0, seed=42):
+def make_eclipsing_binary(
+    period,
+    n_points=500,
+    eclipse_depth=0.5,
+    eclipse_width=0.1,
+    noise_std=0.02,
+    t_span=200.0,
+    seed=42,
+):
     """Generate an eclipsing binary light curve with periodic V-shaped dips."""
     rng = np.random.default_rng(seed)
     times = np.sort(rng.uniform(0, t_span, n_points)).astype(np.float32)
@@ -47,14 +54,12 @@ def make_eclipsing_binary(period, n_points=500, eclipse_depth=0.5,
     dist = np.minimum(phase, 1.0 - phase)
     mags = np.ones(n_points, dtype=np.float32)
     in_eclipse = dist < eclipse_width / 2
-    mags[in_eclipse] = 1.0 - eclipse_depth * (1.0 - dist[in_eclipse]
-                                                / (eclipse_width / 2))
+    mags[in_eclipse] = 1.0 - eclipse_depth * (1.0 - dist[in_eclipse] / (eclipse_width / 2))
     mags += rng.normal(0, noise_std, n_points).astype(np.float32)
     return times, mags
 
 
-def make_rr_lyrae(period, n_points=500, amplitude=0.8, noise_std=0.02,
-                  t_span=200.0, seed=42):
+def make_rr_lyrae(period, n_points=500, amplitude=0.8, noise_std=0.02, t_span=200.0, seed=42):
     """Generate an RR Lyrae-like sawtooth light curve."""
     rng = np.random.default_rng(seed)
     times = np.sort(rng.uniform(0, t_span, n_points)).astype(np.float32)
@@ -63,7 +68,7 @@ def make_rr_lyrae(period, n_points=500, amplitude=0.8, noise_std=0.02,
     mags = np.where(
         phase < rise_end,
         amplitude * (phase / rise_end),
-        amplitude * (1.0 - (phase - rise_end) / (1.0 - rise_end))
+        amplitude * (1.0 - (phase - rise_end) / (1.0 - rise_end)),
     ).astype(np.float32)
     mags += rng.normal(0, noise_std, n_points).astype(np.float32)
     return times, mags
@@ -83,6 +88,7 @@ def period_matches(detected, true_period, tol=0.05, harmonics=None):
 # Conditional Entropy tests
 # ---------------------------------------------------------------------------
 
+
 class TestCPUConditionalEntropy:
     def test_basic_stats_output(self):
         """CE should return a list of Statistics, one per light curve."""
@@ -91,7 +97,7 @@ class TestCPUConditionalEntropy:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ce = ConditionalEntropy(n_phase=10, n_mag=10)
-        result = ce.calc([t], [m], periods, period_dts, output='stats')
+        result = ce.calc([t], [m], periods, period_dts, output="stats")
 
         assert isinstance(result, list)
         assert len(result) == 1
@@ -102,17 +108,19 @@ class TestCPUConditionalEntropy:
     def test_detects_known_period(self):
         """CE should find the correct period for a clean sinusoidal signal."""
         true_period = 5.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=800,
-                                           noise_std=0.02, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         ce = ConditionalEntropy(n_phase=15, n_mag=10)
-        result = ce.calc([t], [m], periods, period_dts, output='stats')
+        result = ce.calc([t], [m], periods, period_dts, output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_periodogram_output(self):
         """CE periodogram output should have correct shape."""
@@ -121,7 +129,7 @@ class TestCPUConditionalEntropy:
         period_dts = np.array([0.0, 0.001], dtype=np.float32)
 
         ce = ConditionalEntropy()
-        result = ce.calc([t], [m], periods, period_dts, output='periodogram')
+        result = ce.calc([t], [m], periods, period_dts, output="periodogram")
 
         assert isinstance(result, list)
         assert len(result) == 1
@@ -132,15 +140,14 @@ class TestCPUConditionalEntropy:
 
     def test_multiple_lightcurves(self):
         """CE should handle batched light curves."""
-        lcs = [make_sinusoidal_lightcurve(period=p, seed=i)
-               for i, p in enumerate([2.0, 4.0, 6.0])]
+        lcs = [make_sinusoidal_lightcurve(period=p, seed=i) for i, p in enumerate([2.0, 4.0, 6.0])]
         times = [lc[0] for lc in lcs]
         mag_list = [lc[1] for lc in lcs]
         periods = np.linspace(1.0, 10.0, 300, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
 
         ce = ConditionalEntropy(n_phase=10, n_mag=10)
-        result = ce.calc(times, mag_list, periods, period_dts, output='stats')
+        result = ce.calc(times, mag_list, periods, period_dts, output="stats")
         assert len(result) == 3
 
     def test_n_stats_multiple(self):
@@ -150,8 +157,7 @@ class TestCPUConditionalEntropy:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ce = ConditionalEntropy()
-        result = ce.calc([t], [m], periods, period_dts,
-                         output='stats', n_stats=5)
+        result = ce.calc([t], [m], periods, period_dts, output="stats", n_stats=5)
         assert isinstance(result[0], list)
         assert len(result[0]) == 5
 
@@ -161,9 +167,8 @@ class TestCPUConditionalEntropy:
         periods = np.linspace(1.0, 10.0, 50, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
 
-        ce = ConditionalEntropy(n_phase=20, n_mag=5,
-                                 phase_bin_extent=2, mag_bin_extent=2)
-        result = ce.calc([t], [m], periods, period_dts, output='stats')
+        ce = ConditionalEntropy(n_phase=20, n_mag=5, phase_bin_extent=2, mag_bin_extent=2)
+        result = ce.calc([t], [m], periods, period_dts, output="stats")
         assert isinstance(result[0], Statistics)
 
     def test_mismatched_times_mags_raises(self):
@@ -185,8 +190,7 @@ class TestCPUConditionalEntropy:
         ce = ConditionalEntropy()
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            ce.calc([t], [m], periods, period_dts,
-                    normalize=True, center=True)
+            ce.calc([t], [m], periods, period_dts, normalize=True, center=True)
             runtime_warns = [x for x in w if issubclass(x.category, RuntimeWarning)]
             assert len(runtime_warns) >= 1
 
@@ -206,6 +210,7 @@ class TestCPUConditionalEntropy:
 # Analysis of Variance tests
 # ---------------------------------------------------------------------------
 
+
 class TestCPUAOV:
     def test_basic_stats_output(self):
         """AOV should return Statistics objects."""
@@ -214,7 +219,7 @@ class TestCPUAOV:
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV(n_phase=10)
-        result = aov.calc([t], [m], periods, period_dts, output='stats')
+        result = aov.calc([t], [m], periods, period_dts, output="stats")
 
         assert isinstance(result, list)
         assert len(result) == 1
@@ -223,17 +228,19 @@ class TestCPUAOV:
     def test_detects_known_period(self):
         """AOV should find the correct period for a clean sinusoidal signal."""
         true_period = 5.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=800,
-                                           noise_std=0.02, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV(n_phase=15)
-        result = aov.calc([t], [m], periods, period_dts, output='stats')
+        result = aov.calc([t], [m], periods, period_dts, output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_periodogram_output(self):
         """AOV periodogram output should have correct shape and use maxima."""
@@ -242,7 +249,7 @@ class TestCPUAOV:
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV()
-        result = aov.calc([t], [m], periods, period_dts, output='periodogram')
+        result = aov.calc([t], [m], periods, period_dts, output="periodogram")
 
         pgram = result[0]
         assert isinstance(pgram, Periodogram)
@@ -251,15 +258,14 @@ class TestCPUAOV:
 
     def test_multiple_lightcurves(self):
         """AOV should handle batched light curves."""
-        lcs = [make_sinusoidal_lightcurve(period=p, seed=i)
-               for i, p in enumerate([2.0, 4.0])]
+        lcs = [make_sinusoidal_lightcurve(period=p, seed=i) for i, p in enumerate([2.0, 4.0])]
         times = [lc[0] for lc in lcs]
         mag_list = [lc[1] for lc in lcs]
         periods = np.linspace(1.0, 10.0, 200, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV()
-        result = aov.calc(times, mag_list, periods, period_dts, output='stats')
+        result = aov.calc(times, mag_list, periods, period_dts, output="stats")
         assert len(result) == 2
 
     def test_normalize_flag(self):
@@ -270,29 +276,31 @@ class TestCPUAOV:
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV()
-        result = aov.calc([t], [m_shifted], periods, period_dts,
-                          normalize=True, output='stats')
+        result = aov.calc([t], [m_shifted], periods, period_dts, normalize=True, output="stats")
         assert isinstance(result[0], Statistics)
 
     def test_overlap_still_detects_period(self):
         """AOV with overlap should still find the correct period."""
         true_period = 4.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=800,
-                                           noise_std=0.02, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV(n_phase=15, phase_bin_extent=3)
-        result = aov.calc([t], [m], periods, period_dts, output='stats')
+        result = aov.calc([t], [m], periods, period_dts, output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Lomb-Scargle tests
 # ---------------------------------------------------------------------------
+
 
 class TestCPULombScargle:
     def test_basic_stats_output(self):
@@ -302,7 +310,7 @@ class TestCPULombScargle:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts, output='stats')
+        result = ls.calc([t], [m], periods, period_dts, output="stats")
 
         assert isinstance(result, list)
         assert len(result) == 1
@@ -311,17 +319,19 @@ class TestCPULombScargle:
     def test_detects_known_period(self):
         """LS should find the correct period for a clean sinusoidal signal."""
         true_period = 5.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=800,
-                                           noise_std=0.02, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts, output='stats')
+        result = ls.calc([t], [m], periods, period_dts, output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_periodogram_output(self):
         """LS periodogram output should have correct shape and use maxima."""
@@ -330,7 +340,7 @@ class TestCPULombScargle:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts, output='periodogram')
+        result = ls.calc([t], [m], periods, period_dts, output="periodogram")
 
         pgram = result[0]
         assert isinstance(pgram, Periodogram)
@@ -339,15 +349,14 @@ class TestCPULombScargle:
 
     def test_multiple_lightcurves(self):
         """LS should handle batched light curves."""
-        lcs = [make_sinusoidal_lightcurve(period=p, seed=i)
-               for i, p in enumerate([2.0, 4.0])]
+        lcs = [make_sinusoidal_lightcurve(period=p, seed=i) for i, p in enumerate([2.0, 4.0])]
         times = [lc[0] for lc in lcs]
         mag_list = [lc[1] for lc in lcs]
         periods = np.linspace(1.0, 10.0, 200, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc(times, mag_list, periods, period_dts, output='stats')
+        result = ls.calc(times, mag_list, periods, period_dts, output="stats")
         assert len(result) == 2
 
     def test_center_default(self):
@@ -357,8 +366,7 @@ class TestCPULombScargle:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts,
-                         center=True, output='stats')
+        result = ls.calc([t], [m], periods, period_dts, center=True, output="stats")
         assert result[0].significance > 0
 
     def test_without_centering(self):
@@ -368,14 +376,16 @@ class TestCPULombScargle:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts,
-                         center=False, normalize=False, output='stats')
+        result = ls.calc(
+            [t], [m], periods, period_dts, center=False, normalize=False, output="stats"
+        )
         assert isinstance(result[0], Statistics)
 
 
 # ---------------------------------------------------------------------------
 # FPW tests
 # ---------------------------------------------------------------------------
+
 
 class TestCPUFPW:
     def test_basic_stats_output(self):
@@ -385,7 +395,7 @@ class TestCPUFPW:
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=10)
-        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+        result = fpw.calc([t], [m], periods, period_dts, output="stats")
 
         assert isinstance(result, list)
         assert len(result) == 1
@@ -395,49 +405,54 @@ class TestCPUFPW:
     def test_detects_known_period(self):
         """FPW should find the correct period for a clean sinusoidal signal."""
         true_period = 5.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=800,
-                                           noise_std=0.02, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=20)
-        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+        result = fpw.calc([t], [m], periods, period_dts, output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_with_uncertainties(self):
         """FPW with explicit uncertainties should detect the period."""
         true_period = 3.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=600,
-                                           noise_std=0.05, t_span=150.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=600, noise_std=0.05, t_span=150.0
+        )
         errs = np.full(len(t), 0.05, dtype=np.float32)
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=15)
-        result = fpw.calc([t], [m], periods, period_dts, errs=[errs],
-                          output='stats')
+        result = fpw.calc([t], [m], periods, period_dts, errs=[errs], output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_without_uncertainties(self):
         """FPW without uncertainties (uniform weights) should still work."""
         true_period = 2.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=500,
-                                           noise_std=0.03, t_span=100.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=500, noise_std=0.03, t_span=100.0
+        )
         periods = make_trial_periods(true_period, n_periods=400)
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=10)
-        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+        result = fpw.calc([t], [m], periods, period_dts, output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_periodogram_output(self):
         """FPW periodogram should have correct shape and use maxima."""
@@ -446,7 +461,7 @@ class TestCPUFPW:
         period_dts = np.array([0.0, 0.001], dtype=np.float32)
 
         fpw = FPW(n_bins=10)
-        result = fpw.calc([t], [m], periods, period_dts, output='periodogram')
+        result = fpw.calc([t], [m], periods, period_dts, output="periodogram")
 
         pgram = result[0]
         assert isinstance(pgram, Periodogram)
@@ -455,15 +470,14 @@ class TestCPUFPW:
 
     def test_multiple_lightcurves(self):
         """FPW should handle batched light curves."""
-        lcs = [make_sinusoidal_lightcurve(period=p, seed=i)
-               for i, p in enumerate([2.0, 4.0, 6.0])]
+        lcs = [make_sinusoidal_lightcurve(period=p, seed=i) for i, p in enumerate([2.0, 4.0, 6.0])]
         times = [lc[0] for lc in lcs]
         mag_list = [lc[1] for lc in lcs]
         periods = np.linspace(1.0, 10.0, 300, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=15)
-        result = fpw.calc(times, mag_list, periods, period_dts, output='stats')
+        result = fpw.calc(times, mag_list, periods, period_dts, output="stats")
         assert len(result) == 3
 
     def test_n_stats_multiple(self):
@@ -473,8 +487,7 @@ class TestCPUFPW:
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=10)
-        result = fpw.calc([t], [m], periods, period_dts,
-                          output='stats', n_stats=5)
+        result = fpw.calc([t], [m], periods, period_dts, output="stats", n_stats=5)
         assert isinstance(result[0], list)
         assert len(result[0]) == 5
 
@@ -514,21 +527,22 @@ class TestCPUFPW:
         period_dts = np.array([0.0], dtype=np.float32)
 
         fpw = FPW(n_bins=20)
-        result = fpw.calc([times], [mags], periods, period_dts, errs=[errs],
-                          output='stats')
+        result = fpw.calc([times], [mags], periods, period_dts, errs=[errs], output="stats")
 
         detected = result[0].params[0]
-        assert abs(detected - true_period) / true_period < 0.05, \
+        assert abs(detected - true_period) / true_period < 0.05, (
             f"Expected ~{true_period}, got {detected}"
+        )
 
     def test_factory_function(self):
         """periodfind.FPW() factory should produce a working FPW object."""
         import periodfind
-        fpw = periodfind.FPW(n_bins=10, device='cpu')
+
+        fpw = periodfind.FPW(n_bins=10, device="cpu")
         t, m = make_sinusoidal_lightcurve(period=3.0)
         periods = np.linspace(1.0, 10.0, 100, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
-        result = fpw.calc([t], [m], periods, period_dts, output='stats')
+        result = fpw.calc([t], [m], periods, period_dts, output="stats")
         assert isinstance(result[0], Statistics)
 
 
@@ -536,12 +550,14 @@ class TestCPUFPW:
 # Cross-algorithm consistency tests
 # ---------------------------------------------------------------------------
 
+
 class TestCPUCrossAlgorithm:
     def test_all_algorithms_find_same_period(self):
         """All three algorithms should agree on the period for clean signals."""
         true_period = 4.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=1000,
-                                           noise_std=0.01, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=1000, noise_std=0.01, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
@@ -550,31 +566,35 @@ class TestCPUCrossAlgorithm:
         ls_algo = LombScargle()
         fpw = FPW(n_bins=15)
 
-        ce_result = ce.calc([t], [m], periods, period_dts, output='stats')
-        aov_result = aov.calc([t], [m], periods, period_dts, output='stats')
-        ls_result = ls_algo.calc([t], [m], periods, period_dts, output='stats')
-        fpw_result = fpw.calc([t], [m], periods, period_dts, output='stats')
+        ce_result = ce.calc([t], [m], periods, period_dts, output="stats")
+        aov_result = aov.calc([t], [m], periods, period_dts, output="stats")
+        ls_result = ls_algo.calc([t], [m], periods, period_dts, output="stats")
+        fpw_result = fpw.calc([t], [m], periods, period_dts, output="stats")
 
         tol = 0.05
-        for name, res in [("CE", ce_result), ("AOV", aov_result),
-                          ("LS", ls_result), ("FPW", fpw_result)]:
+        for name, res in [
+            ("CE", ce_result),
+            ("AOV", aov_result),
+            ("LS", ls_result),
+            ("FPW", fpw_result),
+        ]:
             detected = res[0].params[0]
-            assert abs(detected - true_period) / true_period < tol, \
+            assert abs(detected - true_period) / true_period < tol, (
                 f"{name} detected {detected}, expected ~{true_period}"
+            )
 
     def test_periodogram_best_matches_stats(self):
         """Periodogram.best_params should agree with stats output."""
         true_period = 3.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=500,
-                                           noise_std=0.02, t_span=100.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=500, noise_std=0.02, t_span=100.0
+        )
         periods = make_trial_periods(true_period, n_periods=300)
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV(n_phase=10)
-        stats_result = aov.calc([t], [m], periods, period_dts,
-                                output='stats', n_stats=1)
-        pgram_result = aov.calc([t], [m], periods, period_dts,
-                                output='periodogram')
+        stats_result = aov.calc([t], [m], periods, period_dts, output="stats", n_stats=1)
+        pgram_result = aov.calc([t], [m], periods, period_dts, output="periodogram")
 
         stats_period = stats_result[0].params[0]
         pgram_period = pgram_result[0].best_params(n=1).params[0]
@@ -585,6 +605,7 @@ class TestCPUCrossAlgorithm:
 # Edge case / robustness tests
 # ---------------------------------------------------------------------------
 
+
 class TestCPUEdgeCases:
     def test_single_period_dt(self):
         """Should work with a single period_dt = 0."""
@@ -593,7 +614,7 @@ class TestCPUEdgeCases:
         period_dts = np.array([0.0], dtype=np.float32)
 
         ce = ConditionalEntropy()
-        result = ce.calc([t], [m], periods, period_dts, output='stats')
+        result = ce.calc([t], [m], periods, period_dts, output="stats")
         assert isinstance(result[0], Statistics)
 
     def test_multiple_period_dts(self):
@@ -603,7 +624,7 @@ class TestCPUEdgeCases:
         period_dts = np.linspace(-0.01, 0.01, 5, dtype=np.float32)
 
         ce = ConditionalEntropy()
-        result = ce.calc([t], [m], periods, period_dts, output='periodogram')
+        result = ce.calc([t], [m], periods, period_dts, output="periodogram")
         assert result[0].data.shape == (50, 5)
 
     def test_short_lightcurve(self):
@@ -615,7 +636,7 @@ class TestCPUEdgeCases:
 
         for AlgoCls in [ConditionalEntropy, AOV, LombScargle]:
             algo = AlgoCls()
-            result = algo.calc([t], [m], periods, period_dts, output='stats')
+            result = algo.calc([t], [m], periods, period_dts, output="stats")
             assert isinstance(result[0], Statistics)
 
     def test_invalid_output_type_raises(self):
@@ -626,7 +647,7 @@ class TestCPUEdgeCases:
 
         ce = ConditionalEntropy()
         with pytest.raises(NotImplementedError):
-            ce.calc([t], [m], periods, period_dts, output='invalid')
+            ce.calc([t], [m], periods, period_dts, output="invalid")
 
     def test_significance_types_both_work(self):
         """Both significance types should produce valid results."""
@@ -635,9 +656,10 @@ class TestCPUEdgeCases:
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV()
-        for sig_type in ['stdmean', 'madmedian']:
-            result = aov.calc([t], [m], periods, period_dts,
-                              output='stats', significance_type=sig_type)
+        for sig_type in ["stdmean", "madmedian"]:
+            result = aov.calc(
+                [t], [m], periods, period_dts, output="stats", significance_type=sig_type
+            )
             assert result[0].significance_type == sig_type
             assert result[0].significance > 0
 
@@ -646,57 +668,64 @@ class TestCPUEdgeCases:
 # LSST-like scenarios
 # ---------------------------------------------------------------------------
 
+
 class TestCPULSSTScenarios:
     def test_eclipsing_binary_detection(self):
         """Algorithms should detect an eclipsing binary period."""
         true_period = 2.5
-        t, m = make_eclipsing_binary(period=true_period, n_points=800,
-                                      eclipse_depth=0.5, noise_std=0.02,
-                                      t_span=200.0)
+        t, m = make_eclipsing_binary(
+            period=true_period, n_points=800, eclipse_depth=0.5, noise_std=0.02, t_span=200.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         for AlgoCls in [AOV, LombScargle]:
             algo = AlgoCls() if AlgoCls == LombScargle else AlgoCls(n_phase=20)
-            result = algo.calc([t], [m], periods, period_dts, output='stats')
+            result = algo.calc([t], [m], periods, period_dts, output="stats")
             detected = result[0].params[0]
-            assert period_matches(detected, true_period), \
+            assert period_matches(detected, true_period), (
                 f"{AlgoCls.__name__} detected {detected}, expected ~{true_period}"
+            )
 
     def test_rr_lyrae_detection(self):
         """Algorithms should detect an RR Lyrae period."""
         true_period = 0.6
-        t, m = make_rr_lyrae(period=true_period, n_points=600,
-                              amplitude=0.8, noise_std=0.03, t_span=50.0)
+        t, m = make_rr_lyrae(
+            period=true_period, n_points=600, amplitude=0.8, noise_std=0.03, t_span=50.0
+        )
         periods = make_trial_periods(true_period, n_periods=500)
         period_dts = np.array([0.0], dtype=np.float32)
 
         for AlgoCls in [AOV, LombScargle]:
             algo = AlgoCls() if AlgoCls == LombScargle else AlgoCls(n_phase=20)
-            result = algo.calc([t], [m], periods, period_dts, output='stats')
+            result = algo.calc([t], [m], periods, period_dts, output="stats")
             detected = result[0].params[0]
-            assert period_matches(detected, true_period), \
+            assert period_matches(detected, true_period), (
                 f"{AlgoCls.__name__} detected {detected}, expected ~{true_period}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # Large-scale tests
 # ---------------------------------------------------------------------------
 
+
 class TestCPULargeScale:
     def test_large_period_grid(self):
         """Correctness with a large (5000+) period grid."""
         true_period = 5.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=500,
-                                           noise_std=0.05, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=500, noise_std=0.05, t_span=200.0
+        )
         periods = np.linspace(0.5, 15.0, 5000, dtype=np.float32)
         period_dts = np.array([0.0], dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts, output='stats')
+        result = ls.calc([t], [m], periods, period_dts, output="stats")
         detected = result[0].params[0]
-        assert period_matches(detected, true_period), \
+        assert period_matches(detected, true_period), (
             f"LS large-grid: detected {detected}, expected ~{true_period}"
+        )
 
     def test_large_batch(self):
         """Correctness with a batch of 10+ light curves."""
@@ -705,9 +734,9 @@ class TestCPULargeScale:
         times_list = []
         mags_list = []
         for i, p in enumerate(true_periods):
-            t, m = make_sinusoidal_lightcurve(period=p, n_points=400,
-                                               noise_std=0.03,
-                                               t_span=200.0, seed=i)
+            t, m = make_sinusoidal_lightcurve(
+                period=p, n_points=400, noise_std=0.03, t_span=200.0, seed=i
+            )
             times_list.append(t)
             mags_list.append(m)
 
@@ -715,8 +744,7 @@ class TestCPULargeScale:
         period_dts = np.array([0.0], dtype=np.float32)
 
         aov = AOV(n_phase=15)
-        results = aov.calc(times_list, mags_list, periods, period_dts,
-                           output='stats')
+        results = aov.calc(times_list, mags_list, periods, period_dts, output="stats")
         assert len(results) == n_curves
 
         n_correct = 0
@@ -724,24 +752,27 @@ class TestCPULargeScale:
             detected = res.params[0]
             if period_matches(detected, true_periods[i]):
                 n_correct += 1
-        assert n_correct >= int(0.8 * n_curves), \
+        assert n_correct >= int(0.8 * n_curves), (
             f"Only {n_correct}/{n_curves} periods detected correctly"
+        )
 
     def test_large_grid_with_period_dts(self):
         """Large period grid with multiple period derivatives."""
         true_period = 4.0
-        t, m = make_sinusoidal_lightcurve(period=true_period, n_points=600,
-                                           noise_std=0.03, t_span=200.0)
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=600, noise_std=0.03, t_span=200.0
+        )
         periods = np.linspace(1.0, 10.0, 5000, dtype=np.float32)
         period_dts = np.linspace(-0.001, 0.001, 3, dtype=np.float32)
 
         ls = LombScargle()
-        result = ls.calc([t], [m], periods, period_dts, output='periodogram')
+        result = ls.calc([t], [m], periods, period_dts, output="periodogram")
         pgram = result[0]
         assert pgram.data.shape == (5000, 3)
 
         pdt_zero_col = pgram.data[:, 1]
         best_idx = np.argmax(pdt_zero_col)
         detected = periods[best_idx]
-        assert period_matches(detected, true_period), \
+        assert period_matches(detected, true_period), (
             f"LS large-grid+dts: detected {detected}, expected ~{true_period}"
+        )

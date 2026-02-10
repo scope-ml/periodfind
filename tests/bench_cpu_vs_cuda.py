@@ -7,17 +7,19 @@ Not a pytest test — run as a standalone script:
 Requires GPU for CUDA timings; CPU-only timings are always printed.
 """
 
-import time
-import numpy as np
 import subprocess
+import time
+
+import numpy as np
 
 # Check GPU availability
 HAS_GPU = False
 try:
-    from periodfind.gpu import ConditionalEntropy as CudaCE
     from periodfind.gpu import AOV as CudaAOV
-    from periodfind.gpu import LombScargle as CudaLS
     from periodfind.gpu import FPW as CudaFPW
+    from periodfind.gpu import ConditionalEntropy as CudaCE
+    from periodfind.gpu import LombScargle as CudaLS
+
     ret = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
     if ret.returncode == 0:
         HAS_GPU = True
@@ -25,10 +27,16 @@ except (ImportError, FileNotFoundError, subprocess.TimeoutExpired):
     pass
 
 from periodfind.cpu import (
-    ConditionalEntropy as CpuCE,
     AOV as CpuAOV,
-    LombScargle as CpuLS,
+)
+from periodfind.cpu import (
     FPW as CpuFPW,
+)
+from periodfind.cpu import (
+    ConditionalEntropy as CpuCE,
+)
+from periodfind.cpu import (
+    LombScargle as CpuLS,
 )
 
 
@@ -56,16 +64,16 @@ def bench(fn, warmup=1, repeats=3):
 
 
 WORKLOADS = [
-    ("Small  (1×200×1)",    1, 200, 1),
-    ("Medium (1×2000×3)",   1, 2000, 3),
+    ("Small  (1×200×1)", 1, 200, 1),
+    ("Medium (1×2000×3)", 1, 2000, 3),
     ("Large  (10×5000×1)", 10, 5000, 1),
 ]
 
 ALGORITHMS = [
-    ("CE",  CpuCE,  (CudaCE if HAS_GPU else None),  {"n_phase": 10, "n_mag": 10}, False),
-    ("AOV", CpuAOV, (CudaAOV if HAS_GPU else None),  {"n_phase": 10},              False),
-    ("LS",  CpuLS,  (CudaLS if HAS_GPU else None),   {},                            False),
-    ("FPW", CpuFPW, (CudaFPW if HAS_GPU else None),  {"n_bins": 10},               True),
+    ("CE", CpuCE, (CudaCE if HAS_GPU else None), {"n_phase": 10, "n_mag": 10}, False),
+    ("AOV", CpuAOV, (CudaAOV if HAS_GPU else None), {"n_phase": 10}, False),
+    ("LS", CpuLS, (CudaLS if HAS_GPU else None), {}, False),
+    ("FPW", CpuFPW, (CudaFPW if HAS_GPU else None), {"n_bins": 10}, True),
 ]
 
 
@@ -98,15 +106,19 @@ def main():
             extra = {"errs": errs_list} if needs_errs else {}
 
             # CPU benchmark
-            cpu_ms = bench(lambda: cpu_algo.calc(
-                times_list, mags_list, periods, period_dts,
-                output='stats', **extra))
+            cpu_ms = bench(
+                lambda: cpu_algo.calc(
+                    times_list, mags_list, periods, period_dts, output="stats", **extra
+                )
+            )
 
             # CUDA benchmark
             if cuda_algo:
-                cuda_ms = bench(lambda: cuda_algo.calc(
-                    times_list, mags_list, periods, period_dts,
-                    output='stats', **extra))
+                cuda_ms = bench(
+                    lambda: cuda_algo.calc(
+                        times_list, mags_list, periods, period_dts, output="stats", **extra
+                    )
+                )
                 speedup = cpu_ms / cuda_ms
                 cuda_str = f"{cuda_ms:10.1f}"
                 speedup_str = f"{speedup:7.1f}x"

@@ -366,26 +366,25 @@ void AOV::CalcAOVValsBatched(const std::vector<float*>& times,
         // Copy light curve into device buffer (async)
         const size_t curve_bytes = lengths[i] * sizeof(float);
         gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
         gpuErrchk(cudaMemcpyAsync(dev_mags_buf[s], mags[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
 
         // Zero AOV output
         gpuErrchk(cudaMemsetAsync(dev_aovs_buf[s], 0, aov_out_size, stream));
 
-        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb,
-                        stream>>>(dev_times_buf[s], dev_mags_buf[s],
-                                  lengths[i], dev_periods, dev_period_dts,
-                                  *this, dev_hists_buf[s]);
+        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb, stream>>>(
+            dev_times_buf[s], dev_mags_buf[s], lengths[i], dev_periods,
+            dev_period_dts, *this, dev_hists_buf[s]);
 
         AOVKernel<<<num_blocks_aov, num_threads_aov, shared_bytes_aov,
-                    stream>>>(dev_hists_buf[s], num_hists, lengths[i],
-                              mean_mag, *this, dev_aovs_buf[s]);
+                    stream>>>(dev_hists_buf[s], num_hists, lengths[i], mean_mag,
+                              *this, dev_aovs_buf[s]);
 
         // Copy AOV data back to host (async)
         gpuErrchk(cudaMemcpyAsync(&aov_out[i * num_hists], dev_aovs_buf[s],
-                                   aov_out_size, cudaMemcpyDeviceToHost,
-                                   stream));
+                                  aov_out_size, cudaMemcpyDeviceToHost,
+                                  stream));
     }
 
     // Synchronize and clean up streams

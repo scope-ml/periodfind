@@ -34,7 +34,7 @@ class ConditionalEntropy {
      * Constructs a ConditionalEntropy object with 10 phase bins and 10
      * magnitude bins.
      */
-    ConditionalEntropy() : ConditionalEntropy(10, 10){};
+    ConditionalEntropy() : ConditionalEntropy(10, 10) {};
 
     /**
      * Constructs a ConditionalEntropy object with the given number of phase and

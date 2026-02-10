@@ -36,14 +36,14 @@ class AOV {
     /**
      * Constructs an AOV object with 10 phase bins.
      */
-    AOV() : AOV(10){};
+    AOV() : AOV(10) {};
 
     /**
      * Constructs an AOV object with the given number of phase bins.
      *
      * @param n_bins number of bins
      */
-    AOV(size_t n_bins) : AOV(n_bins, 1){};
+    AOV(size_t n_bins) : AOV(n_bins, 1) {};
 
     /**
      * Constructs an AOV object with the given number of phase bins and using
@@ -67,7 +67,7 @@ class AOV {
      * @return amount of phase bin overlap in histogram
      */
     __host__ __device__ size_t NumPhaseBinOverlap() const;
-    
+
     /**
      * Gives the first phase bin for a given phase value.
      *

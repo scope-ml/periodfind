@@ -1,7 +1,6 @@
 /// Conditional Entropy algorithm — CPU implementation matching CUDA kernels.
 ///
 /// Translates FoldBinKernel + ConditionalEntropyKernel from ce.cu.
-
 use rayon::prelude::*;
 
 use crate::fold;

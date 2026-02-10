@@ -313,9 +313,9 @@ float* ConditionalEntropy::FoldAndBin(const float* times,
     gpuErrchk(cudaMemcpy(dev_times, times, data_bytes, cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(dev_mags, mags, data_bytes, cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
-              cudaMemcpyHostToDevice));
+                         cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
-              cudaMemcpyHostToDevice));
+                         cudaMemcpyHostToDevice));
 
     float* dev_hists =
         DeviceFoldAndBin(dev_times, dev_mags, length, dev_periods,
@@ -350,8 +350,8 @@ float* ConditionalEntropy::DeviceCalcCEFromHists(const float* hists,
 
     // NOTE: A ConditionalEntropy object is small enough that we can pass it in
     //       the registers by dereferencing it.
-    ConditionalEntropyKernel<<<n_b, n_t, shared_bytes>>>(
-        hists, num_hists, *this, dev_ces);
+    ConditionalEntropyKernel<<<n_b, n_t, shared_bytes>>>(hists, num_hists,
+                                                         *this, dev_ces);
 
     return dev_ces;
 }
@@ -476,17 +476,16 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
         // Copy light curve into device buffer (async)
         const size_t curve_bytes = lengths[i] * sizeof(float);
         gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
         gpuErrchk(cudaMemcpyAsync(dev_mags_buf[s], mags[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
 
         // Zero conditional entropy output
         gpuErrchk(cudaMemsetAsync(dev_ces_buf[s], 0, ce_out_size, stream));
 
-        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb,
-                        stream>>>(dev_times_buf[s], dev_mags_buf[s],
-                                  lengths[i], dev_periods, dev_period_dts,
-                                  *this, dev_hists_buf[s]);
+        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb, stream>>>(
+            dev_times_buf[s], dev_mags_buf[s], lengths[i], dev_periods,
+            dev_period_dts, *this, dev_hists_buf[s]);
 
         ConditionalEntropyKernel<<<num_blocks_ce, num_threads_ce,
                                    shared_bytes_ce, stream>>>(
@@ -494,8 +493,7 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
 
         // Copy CE data back to host (async)
         gpuErrchk(cudaMemcpyAsync(&ce_out[i * num_hists], dev_ces_buf[s],
-                                   ce_out_size, cudaMemcpyDeviceToHost,
-                                   stream));
+                                  ce_out_size, cudaMemcpyDeviceToHost, stream));
     }
 
     // Synchronize and clean up streams

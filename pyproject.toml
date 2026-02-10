@@ -32,3 +32,32 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/ZwickyTransientFacility/periodfind"
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+exclude = ["env", "build", "dist", "*.egg-info"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long (let ruff-format handle it)
+    "E741",  # ambiguous variable name (common in scientific code)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]      # imports after try/except guards are intentional
+"tests/bench_*" = ["B023"] # lambda loop-var capture is fine in benchmarks
+
+[tool.ruff.lint.isort]
+known-first-party = ["periodfind"]

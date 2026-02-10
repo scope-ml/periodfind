@@ -48,8 +48,7 @@ fn calc_ce_batched<'py>(
 
         for period_idx in 0..n_periods {
             for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] =
-                    result[period_idx * n_pdts + pdt_idx];
+                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
             }
         }
     }
@@ -93,8 +92,7 @@ fn calc_aov_batched<'py>(
 
         for period_idx in 0..n_periods {
             for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] =
-                    result[period_idx * n_pdts + pdt_idx];
+                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
             }
         }
     }
@@ -125,17 +123,11 @@ fn calc_ls_batched<'py>(
         let times_slice = times_list[curve_idx].as_slice()?;
         let mags_slice = mags_list[curve_idx].as_slice()?;
 
-        let result = ls::calc_ls(
-            times_slice,
-            mags_slice,
-            periods_slice,
-            period_dts_slice,
-        );
+        let result = ls::calc_ls(times_slice, mags_slice, periods_slice, period_dts_slice);
 
         for period_idx in 0..n_periods {
             for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] =
-                    result[period_idx * n_pdts + pdt_idx];
+                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
             }
         }
     }
@@ -180,8 +172,7 @@ fn calc_fpw_batched<'py>(
 
         for period_idx in 0..n_periods {
             for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] =
-                    result[period_idx * n_pdts + pdt_idx];
+                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
             }
         }
     }

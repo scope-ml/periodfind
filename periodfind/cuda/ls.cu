@@ -64,9 +64,11 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
     float cos_val, sin_val, i_part;
 
     // Process the light curve in tiles
-    for (size_t tile_start = 0; tile_start < length; tile_start += LS_TILE_SIZE) {
+    for (size_t tile_start = 0; tile_start < length;
+         tile_start += LS_TILE_SIZE) {
         size_t tile_end = tile_start + LS_TILE_SIZE;
-        if (tile_end > length) tile_end = length;
+        if (tile_end > length)
+            tile_end = length;
         size_t tile_len = tile_end - tile_start;
 
         // Cooperatively load tile into shared memory
@@ -95,12 +97,14 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
     }
 
     // Only thread 0 computes the final LS value (all threads have full sums)
-    if (threadIdx.x != 0) return;
+    if (threadIdx.x != 0)
+        return;
 
     float sin_sin = static_cast<float>(length) - cos_cos;
 
     float cos_tau, sin_tau;
-    sincosf(0.5f * atan2f(2.0f * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
+    sincosf(0.5f * atan2f(2.0f * cos_sin, cos_cos - sin_sin), &sin_tau,
+            &cos_tau);
 
     float numerator_l = cos_tau * mag_cos + sin_tau * mag_sin;
     numerator_l *= numerator_l;
@@ -141,8 +145,8 @@ float* LombScargle::DeviceCalcLS(const float* times,
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
     LombScargleKernel<<<grid_dim, num_threads, shared_bytes>>>(
-        times, mags, length, periods, period_dts, num_periods, num_p_dts,
-        *this, periodogram);
+        times, mags, length, periods, period_dts, num_periods, num_p_dts, *this,
+        periodogram);
 
     return periodogram;
 }
@@ -229,9 +233,9 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
         // Copy light curve into device buffer (async)
         const size_t curve_bytes = lengths[i] * sizeof(float);
         gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
         gpuErrchk(cudaMemcpyAsync(dev_mags_buf[s], mags[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
 
         // Zero periodogram output
         gpuErrchk(cudaMemsetAsync(dev_per_buf[s], 0, per_out_size, stream));
@@ -242,8 +246,8 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
 
         // Copy periodogram back to host (async)
         gpuErrchk(cudaMemcpyAsync(&per_out[i * per_points], dev_per_buf[s],
-                                   per_out_size, cudaMemcpyDeviceToHost,
-                                   stream));
+                                  per_out_size, cudaMemcpyDeviceToHost,
+                                  stream));
     }
 
     // Synchronize and clean up streams

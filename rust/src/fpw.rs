@@ -2,7 +2,6 @@
 ///
 /// Implements the FPW statistic from Finkbeiner et al. 2025, adapted to the
 /// periodfind period/period_dt grid convention.
-
 use rayon::prelude::*;
 
 use crate::fold;

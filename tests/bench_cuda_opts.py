@@ -11,25 +11,27 @@ Usage:
 Requires a CUDA-capable GPU and the periodfind CUDA extensions.
 """
 
+import json
+import statistics
+import subprocess
 import sys
 import time
-import subprocess
-import statistics
-import json
 
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # GPU availability check
 # ---------------------------------------------------------------------------
 
+
 def check_gpu():
     """Return True if CUDA extensions load and nvidia-smi succeeds."""
     try:
-        from periodfind.gpu import ConditionalEntropy  # noqa: F401
-        from periodfind.gpu import AOV                 # noqa: F401
-        from periodfind.gpu import LombScargle         # noqa: F401
+        from periodfind.gpu import (
+            AOV,  # noqa: F401
+            ConditionalEntropy,  # noqa: F401
+            LombScargle,  # noqa: F401
+        )
     except ImportError as exc:
         print(f"ERROR: Could not import CUDA extensions: {exc}")
         print("Build the package with CUDA support first.")
@@ -37,7 +39,9 @@ def check_gpu():
 
     try:
         ret = subprocess.run(
-            ["nvidia-smi"], capture_output=True, timeout=5,
+            ["nvidia-smi"],
+            capture_output=True,
+            timeout=5,
         )
         if ret.returncode != 0:
             print("ERROR: nvidia-smi returned non-zero exit code.")
@@ -57,8 +61,10 @@ def check_gpu():
 # Synthetic light-curve generator
 # ---------------------------------------------------------------------------
 
-def make_sinusoidal_lightcurve(period=5.0, n_points=500, amplitude=1.0,
-                               noise_std=0.05, t_span=200.0, seed=42):
+
+def make_sinusoidal_lightcurve(
+    period=5.0, n_points=500, amplitude=1.0, noise_std=0.05, t_span=200.0, seed=42
+):
     """Generate a synthetic sinusoidal light curve with a known period.
 
     Returns (times, mags) as float32 numpy arrays.
@@ -74,6 +80,7 @@ def make_sinusoidal_lightcurve(period=5.0, n_points=500, amplitude=1.0,
 # ---------------------------------------------------------------------------
 # Timing helper
 # ---------------------------------------------------------------------------
+
 
 def bench(fn, n_warmup=2, n_timed=5):
     """Time *fn* and return (median_ms, min_ms, max_ms).
@@ -99,15 +106,16 @@ def bench(fn, n_warmup=2, n_timed=5):
 # Correctness check
 # ---------------------------------------------------------------------------
 
-def verify_detected_period(algo, algo_name, times_list, mags_list,
-                           periods, period_dts, true_period, use_max):
+
+def verify_detected_period(
+    algo, algo_name, times_list, mags_list, periods, period_dts, true_period, use_max
+):
     """Run the algorithm once and check the detected period is near *true_period*.
 
     For CE (use_max=False) the best statistic is the minimum; for AOV and LS
     (use_max=True) it is the maximum.  Returns (detected_period, passed).
     """
-    result = algo.calc(times_list, mags_list, periods, period_dts,
-                       output="periodogram")
+    result = algo.calc(times_list, mags_list, periods, period_dts, output="periodogram")
     pgram_data = result[0].data  # shape (n_periods, n_pdts)
 
     # Collapse over period-derivative axis
@@ -122,9 +130,7 @@ def verify_detected_period(algo, algo_name, times_list, mags_list,
 
     # Allow true period or half/double harmonic, 5 % tolerance
     candidates = [true_period, true_period / 2.0, true_period * 2.0]
-    passed = any(
-        abs(detected - c) / c < 0.05 for c in candidates
-    )
+    passed = any(abs(detected - c) / c < 0.05 for c in candidates)
     return detected, passed
 
 
@@ -134,8 +140,8 @@ def verify_detected_period(algo, algo_name, times_list, mags_list,
 
 WORKLOADS = [
     # (label, n_curves, n_points, n_periods, n_pdts)
-    ("Small  (1x500x200x1)",    1, 500,  200, 1),
-    ("Medium (5x500x1000x3)",   5, 500, 1000, 3),
+    ("Small  (1x500x200x1)", 1, 500, 200, 1),
+    ("Medium (5x500x1000x3)", 5, 500, 1000, 3),
     ("Large  (20x500x5000x1)", 20, 500, 5000, 1),
 ]
 
@@ -149,14 +155,12 @@ def build_algorithms():
 
     Returns a list of (name, algo_instance, use_max) tuples.
     """
-    from periodfind.gpu import ConditionalEntropy
-    from periodfind.gpu import AOV
-    from periodfind.gpu import LombScargle
+    from periodfind.gpu import AOV, ConditionalEntropy, LombScargle
 
     return [
-        ("CE",  ConditionalEntropy(n_phase=10, n_mag=10), False),
-        ("AOV", AOV(n_phase=10),                          True),
-        ("LS",  LombScargle(),                            True),
+        ("CE", ConditionalEntropy(n_phase=10, n_mag=10), False),
+        ("AOV", AOV(n_phase=10), True),
+        ("LS", LombScargle(), True),
     ]
 
 
@@ -166,8 +170,10 @@ def build_workload_data(n_curves, n_points, n_periods, n_pdts):
     mags_list = []
     for i in range(n_curves):
         t, m = make_sinusoidal_lightcurve(
-            period=TRUE_PERIOD, n_points=n_points,
-            t_span=T_SPAN, seed=i,
+            period=TRUE_PERIOD,
+            n_points=n_points,
+            t_span=T_SPAN,
+            seed=i,
         )
         times_list.append(t)
         mags_list.append(m)
@@ -185,6 +191,7 @@ def build_workload_data(n_curves, n_points, n_periods, n_pdts):
 # ---------------------------------------------------------------------------
 # Main benchmark driver
 # ---------------------------------------------------------------------------
+
 
 def run_benchmarks():
     """Run all benchmarks and return a results dict."""
@@ -206,19 +213,31 @@ def run_benchmarks():
     for algo_name, algo, use_max in algorithms:
         for wl_label, n_curves, n_points, n_periods, n_pdts in WORKLOADS:
             times_list, mags_list, periods, period_dts = build_workload_data(
-                n_curves, n_points, n_periods, n_pdts,
+                n_curves,
+                n_points,
+                n_periods,
+                n_pdts,
             )
 
             # -- correctness check ----------------------------------------
             detected, passed = verify_detected_period(
-                algo, algo_name, times_list, mags_list,
-                periods, period_dts, TRUE_PERIOD, use_max,
+                algo,
+                algo_name,
+                times_list,
+                mags_list,
+                periods,
+                period_dts,
+                TRUE_PERIOD,
+                use_max,
             )
 
             # -- timing ---------------------------------------------------
             def run():
                 algo.calc(
-                    times_list, mags_list, periods, period_dts,
+                    times_list,
+                    mags_list,
+                    periods,
+                    period_dts,
                     output="stats",
                 )
 
@@ -258,6 +277,7 @@ def run_benchmarks():
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     if not check_gpu():
         sys.exit(1)
@@ -268,9 +288,9 @@ def main():
     print(f"True period       : {TRUE_PERIOD}")
     print(f"Points per curve  : {N_POINTS}")
     print(f"Time span         : {T_SPAN}")
-    print(f"Warmup runs       : 2")
-    print(f"Timed runs        : 5")
-    print(f"Timing method     : time.perf_counter, reporting median")
+    print("Warmup runs       : 2")
+    print("Timed runs        : 5")
+    print("Timing method     : time.perf_counter, reporting median")
 
     results = run_benchmarks()
 
@@ -281,13 +301,14 @@ def main():
     # Summary: flag any correctness failures
     failures = [k for k, v in results.items() if not v["correct"]]
     if failures:
-        print(f"\nWARNING: {len(failures)} workload(s) failed the "
-              "correctness check:")
+        print(f"\nWARNING: {len(failures)} workload(s) failed the correctness check:")
         for f in failures:
             r = results[f]
-            print(f"  {r['algorithm']} / {r['workload']} "
-                  f"-- detected {r['detected_period']}, "
-                  f"expected ~{TRUE_PERIOD}")
+            print(
+                f"  {r['algorithm']} / {r['workload']} "
+                f"-- detected {r['detected_period']}, "
+                f"expected ~{TRUE_PERIOD}"
+            )
     else:
         print("\nAll correctness checks passed.")
 

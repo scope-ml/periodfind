@@ -21,7 +21,7 @@ class FPW {
     float bin_size;
 
    public:
-    FPW() : FPW(10){};
+    FPW() : FPW(10) {};
 
     FPW(size_t n_bins);
 

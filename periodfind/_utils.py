@@ -5,6 +5,7 @@ logic that was previously duplicated across ce.pyx, aov.pyx, and ls.pyx.
 """
 
 import warnings
+
 import numpy as np
 
 
@@ -27,8 +28,7 @@ def prepare_magnitudes(mags, center, normalize):
     """
     if center and normalize:
         warnings.warn(
-            'Center and normalize are conflicting settings. '
-            'Normalize will be ignored.',
+            "Center and normalize are conflicting settings. Normalize will be ignored.",
             RuntimeWarning,
             stacklevel=3,
         )
@@ -72,8 +72,7 @@ def validate_inputs(times, mags):
     for i, (t, m) in enumerate(zip(times, mags)):
         if len(t) != len(m):
             raise ValueError(
-                f"times[{i}] and mags[{i}] have different lengths: "
-                f"{len(t)} vs {len(m)}"
+                f"times[{i}] and mags[{i}] have different lengths: {len(t)} vs {len(m)}"
             )
 
 
@@ -94,6 +93,4 @@ def ensure_float32(arrays, name):
     """
     for i, arr in enumerate(arrays):
         if arr.dtype != np.float32:
-            raise TypeError(
-                f"{name}[{i}] has dtype {arr.dtype}, expected float32"
-            )
+            raise TypeError(f"{name}[{i}] has dtype {arr.dtype}, expected float32")

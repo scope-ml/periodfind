@@ -48,8 +48,8 @@ __global__ void FPWKernel(const float* __restrict__ times,
                           float* __restrict__ fpw_out) {
     // Shared memory for tiling light curve data
     extern __shared__ float sh_data[];
-    float* sh_times  = &sh_data[0];
-    float* sh_ivar   = &sh_data[FPW_TILE_SIZE];
+    float* sh_times = &sh_data[0];
+    float* sh_ivar = &sh_data[FPW_TILE_SIZE];
     float* sh_ivar_y = &sh_data[2 * FPW_TILE_SIZE];
 
     // One block per (period, period_dt) pair
@@ -82,7 +82,7 @@ __global__ void FPWKernel(const float* __restrict__ times,
     // Allocate bin arrays in registers for thread 0
     // For bins > 256 this won't work well, but FPW uses 10-100 bins typically
 
-    float vtcinvv[256]; // max bins capped at 256
+    float vtcinvv[256];  // max bins capped at 256
     float ytcinvv[256];
 
     if (threadIdx.x == 0) {
@@ -93,15 +93,17 @@ __global__ void FPWKernel(const float* __restrict__ times,
     }
 
     // Process the light curve in tiles
-    for (size_t tile_start = 0; tile_start < length; tile_start += FPW_TILE_SIZE) {
+    for (size_t tile_start = 0; tile_start < length;
+         tile_start += FPW_TILE_SIZE) {
         size_t tile_end = tile_start + FPW_TILE_SIZE;
-        if (tile_end > length) tile_end = length;
+        if (tile_end > length)
+            tile_end = length;
         size_t tile_len = tile_end - tile_start;
 
         // Cooperatively load tile into shared memory
         for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
-            sh_times[i]  = times[tile_start + i];
-            sh_ivar[i]   = ivar[tile_start + i];
+            sh_times[i] = times[tile_start + i];
+            sh_ivar[i] = ivar[tile_start + i];
             sh_ivar_y[i] = ivar_y[tile_start + i];
         }
         __syncthreads();
@@ -114,7 +116,8 @@ __global__ void FPWKernel(const float* __restrict__ times,
                 float folded = fabsf(modff(t_corr / period, &i_part));
 
                 size_t bin = params.PhaseBin(folded);
-                if (bin >= n_bins) bin = n_bins - 1;
+                if (bin >= n_bins)
+                    bin = n_bins - 1;
 
                 vtcinvv[bin] += sh_ivar[i];
                 ytcinvv[bin] += sh_ivar_y[i];
@@ -124,7 +127,8 @@ __global__ void FPWKernel(const float* __restrict__ times,
     }
 
     // Thread 0 computes the final FPW statistic
-    if (threadIdx.x != 0) return;
+    if (threadIdx.x != 0)
+        return;
 
     float delta_chi = 0.0f;
     for (size_t k = 0; k < n_bins; k++) {
@@ -209,11 +213,11 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
         // Copy light curve data into device buffers (async)
         const size_t curve_bytes = lengths[i] * sizeof(float);
         gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
         gpuErrchk(cudaMemcpyAsync(dev_ivar_buf[s], h_ivar, curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
         gpuErrchk(cudaMemcpyAsync(dev_ivar_y_buf[s], h_ivar_y, curve_bytes,
-                                   cudaMemcpyHostToDevice, stream));
+                                  cudaMemcpyHostToDevice, stream));
 
         // Zero output
         gpuErrchk(cudaMemsetAsync(dev_fpw_buf[s], 0, per_out_size, stream));
@@ -225,8 +229,8 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
 
         // Copy result back to host (async)
         gpuErrchk(cudaMemcpyAsync(&fpw_out[i * per_points], dev_fpw_buf[s],
-                                   per_out_size, cudaMemcpyDeviceToHost,
-                                   stream));
+                                  per_out_size, cudaMemcpyDeviceToHost,
+                                  stream));
     }
 
     // Synchronize and clean up streams
@@ -250,21 +254,21 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
 }
 
 float* FPW::CalcFPWBatched(const std::vector<float*>& times,
-                            const std::vector<float*>& mags,
-                            const std::vector<float*>& errs,
-                            const std::vector<size_t>& lengths,
-                            const float* periods,
-                            const float* period_dts,
-                            const size_t num_periods,
-                            const size_t num_p_dts) const {
+                           const std::vector<float*>& mags,
+                           const std::vector<float*>& errs,
+                           const std::vector<size_t>& lengths,
+                           const float* periods,
+                           const float* period_dts,
+                           const size_t num_periods,
+                           const size_t num_p_dts) const {
     size_t per_points = num_periods * num_p_dts;
     size_t per_out_size = per_points * sizeof(float);
     size_t per_size_total = per_out_size * lengths.size();
 
     float* fpw_out = (float*)malloc(per_size_total);
 
-    CalcFPWBatched(times, mags, errs, lengths, periods, period_dts,
-                   num_periods, num_p_dts, fpw_out);
+    CalcFPWBatched(times, mags, errs, lengths, periods, period_dts, num_periods,
+                   num_p_dts, fpw_out);
 
     return fpw_out;
 }

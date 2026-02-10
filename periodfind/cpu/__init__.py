@@ -5,9 +5,10 @@ ls.pyx), but uses a Rust+Rayon backend that runs on the CPU.
 """
 
 import numpy as np
-from periodfind import Statistics, Periodogram
-from periodfind._utils import prepare_magnitudes, validate_inputs, ensure_float32
-from periodfind_cpu import calc_ce_batched, calc_aov_batched, calc_ls_batched, calc_fpw_batched
+from periodfind_cpu import calc_aov_batched, calc_ce_batched, calc_fpw_batched, calc_ls_batched
+
+from periodfind import Periodogram, Statistics
+from periodfind._utils import ensure_float32, prepare_magnitudes, validate_inputs
 
 
 class ConditionalEntropy:
@@ -31,9 +32,18 @@ class ConditionalEntropy:
         self.phase_bin_extent = phase_bin_extent
         self.mag_bin_extent = mag_bin_extent
 
-    def calc(self, times, mags, periods, period_dts,
-             output="stats", normalize=True, center=False,
-             n_stats=1, significance_type='stdmean'):
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        output="stats",
+        normalize=True,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+    ):
         """Runs Conditional Entropy calculations on a list of light curves.
 
         Parameters
@@ -62,18 +72,23 @@ class ConditionalEntropy:
         list of Statistics or list of Periodogram
         """
         validate_inputs(times, mags)
-        ensure_float32(times, 'times')
-        ensure_float32(mags, 'mags')
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
 
         mags_use = prepare_magnitudes(mags, center, normalize)
 
         ces_ndarr = calc_ce_batched(
-            times, mags_use, periods, period_dts,
-            self.n_phase, self.n_mag,
-            self.phase_bin_extent, self.mag_bin_extent,
+            times,
+            mags_use,
+            periods,
+            period_dts,
+            self.n_phase,
+            self.n_mag,
+            self.phase_bin_extent,
+            self.mag_bin_extent,
         )
 
-        if output == 'stats':
+        if output == "stats":
             all_stats = []
             for i in range(len(times)):
                 stats = Statistics.statistics_from_data(
@@ -85,13 +100,12 @@ class ConditionalEntropy:
                 )
                 all_stats.append(stats)
             return all_stats
-        elif output == 'periodogram':
-            return [Periodogram(data, [periods, period_dts], False)
-                    for data in ces_ndarr]
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], False) for data in ces_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. '
-                f'Use "stats" or "periodogram".')
+                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+            )
 
 
 class AOV:
@@ -109,9 +123,18 @@ class AOV:
         self.n_phase = n_phase
         self.phase_bin_extent = phase_bin_extent
 
-    def calc(self, times, mags, periods, period_dts,
-             output="stats", normalize=False, center=False,
-             n_stats=1, significance_type='stdmean'):
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        output="stats",
+        normalize=False,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+    ):
         """Runs Analysis-of-Variance calculations on a list of light curves.
 
         Parameters
@@ -140,17 +163,21 @@ class AOV:
         list of Statistics or list of Periodogram
         """
         validate_inputs(times, mags)
-        ensure_float32(times, 'times')
-        ensure_float32(mags, 'mags')
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
 
         mags_use = prepare_magnitudes(mags, center, normalize)
 
         aovs_ndarr = calc_aov_batched(
-            times, mags_use, periods, period_dts,
-            self.n_phase, self.phase_bin_extent,
+            times,
+            mags_use,
+            periods,
+            period_dts,
+            self.n_phase,
+            self.phase_bin_extent,
         )
 
-        if output == 'stats':
+        if output == "stats":
             all_stats = []
             for i in range(len(times)):
                 stats = Statistics.statistics_from_data(
@@ -162,13 +189,12 @@ class AOV:
                 )
                 all_stats.append(stats)
             return all_stats
-        elif output == 'periodogram':
-            return [Periodogram(data, [periods, period_dts], True)
-                    for data in aovs_ndarr]
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in aovs_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. '
-                f'Use "stats" or "periodogram".')
+                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+            )
 
 
 class LombScargle:
@@ -177,9 +203,18 @@ class LombScargle:
     def __init__(self):
         pass
 
-    def calc(self, times, mags, periods, period_dts,
-             output="stats", normalize=False, center=True,
-             n_stats=1, significance_type='stdmean'):
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        output="stats",
+        normalize=False,
+        center=True,
+        n_stats=1,
+        significance_type="stdmean",
+    ):
         """Runs Lomb-Scargle calculations on a list of light curves.
 
         Parameters
@@ -208,16 +243,19 @@ class LombScargle:
         list of Statistics or list of Periodogram
         """
         validate_inputs(times, mags)
-        ensure_float32(times, 'times')
-        ensure_float32(mags, 'mags')
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
 
         mags_use = prepare_magnitudes(mags, center, normalize)
 
         ls_ndarr = calc_ls_batched(
-            times, mags_use, periods, period_dts,
+            times,
+            mags_use,
+            periods,
+            period_dts,
         )
 
-        if output == 'stats':
+        if output == "stats":
             all_stats = []
             for i in range(len(times)):
                 stats = Statistics.statistics_from_data(
@@ -229,13 +267,12 @@ class LombScargle:
                 )
                 all_stats.append(stats)
             return all_stats
-        elif output == 'periodogram':
-            return [Periodogram(data, [periods, period_dts], True)
-                    for data in ls_ndarr]
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in ls_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. '
-                f'Use "stats" or "periodogram".')
+                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+            )
 
 
 class FPW:
@@ -253,9 +290,19 @@ class FPW:
     def __init__(self, n_bins=10):
         self.n_bins = n_bins
 
-    def calc(self, times, mags, periods, period_dts,
-             errs=None, output="stats", normalize=False, center=False,
-             n_stats=1, significance_type='stdmean'):
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        errs=None,
+        output="stats",
+        normalize=False,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+    ):
         """Runs FPW calculations on a list of light curves.
 
         Parameters
@@ -287,30 +334,35 @@ class FPW:
         list of Statistics or list of Periodogram
         """
         validate_inputs(times, mags)
-        ensure_float32(times, 'times')
-        ensure_float32(mags, 'mags')
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
 
         # Handle uncertainties
         if errs is None:
             errs = [np.ones(len(t), dtype=np.float32) for t in times]
         else:
-            ensure_float32(errs, 'errs')
+            ensure_float32(errs, "errs")
             if len(errs) != len(times):
                 raise ValueError(
                     f"errs must have the same number of arrays as times, "
-                    f"got {len(errs)} and {len(times)}")
+                    f"got {len(errs)} and {len(times)}"
+                )
             for i, (e, t) in enumerate(zip(errs, times)):
                 if len(e) != len(t):
                     raise ValueError(
-                        f"errs[{i}] and times[{i}] have different lengths: "
-                        f"{len(e)} vs {len(t)}")
+                        f"errs[{i}] and times[{i}] have different lengths: {len(e)} vs {len(t)}"
+                    )
 
         fpw_ndarr = calc_fpw_batched(
-            times, mags, errs, periods, period_dts,
+            times,
+            mags,
+            errs,
+            periods,
+            period_dts,
             self.n_bins,
         )
 
-        if output == 'stats':
+        if output == "stats":
             all_stats = []
             for i in range(len(times)):
                 stats = Statistics.statistics_from_data(
@@ -322,10 +374,9 @@ class FPW:
                 )
                 all_stats.append(stats)
             return all_stats
-        elif output == 'periodogram':
-            return [Periodogram(data, [periods, period_dts], True)
-                    for data in fpw_ndarr]
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in fpw_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. '
-                f'Use "stats" or "periodogram".')
+                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+            )

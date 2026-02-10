@@ -1,5 +1,6 @@
-import numpy as np
 import subprocess
+
+import numpy as np
 
 # Copyright 2020 California Institute of Technology. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
@@ -38,9 +39,8 @@ def _resolve_device(device=None):
     """
     if device is not None:
         device = device.lower()
-        if device not in ('cpu', 'gpu'):
-            raise ValueError(
-                f"Unknown device '{device}'. Choose 'cpu' or 'gpu'.")
+        if device not in ("cpu", "gpu"):
+            raise ValueError(f"Unknown device '{device}'. Choose 'cpu' or 'gpu'.")
         return device
 
     global _default_device
@@ -50,21 +50,20 @@ def _resolve_device(device=None):
     # Auto-detect
     try:
         import periodfind.ce  # noqa: F401
-        ret = subprocess.run(
-            ["nvidia-smi"], capture_output=True, timeout=5)
+
+        ret = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
         if ret.returncode == 0:
-            return 'gpu'
+            return "gpu"
     except (ImportError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    return 'cpu'
+    return "cpu"
 
 
 def set_device(device):
     """Set the global default device to ``'cpu'`` or ``'gpu'``."""
     device = device.lower()
-    if device not in ('cpu', 'gpu'):
-        raise ValueError(
-            f"Unknown device '{device}'. Choose 'cpu' or 'gpu'.")
+    if device not in ("cpu", "gpu"):
+        raise ValueError(f"Unknown device '{device}'. Choose 'cpu' or 'gpu'.")
     global _default_device
     _default_device = device
 
@@ -78,14 +77,15 @@ def get_device():
 # Factory functions
 # ---------------------------------------------------------------------------
 
+
 def ConditionalEntropy(**kwargs):
     """Create a Conditional Entropy algorithm on the resolved device.
 
     Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
     are forwarded to the backend class constructor.
     """
-    device = _resolve_device(kwargs.pop('device', None))
-    if device == 'gpu':
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
         from periodfind.gpu import ConditionalEntropy as _Cls
     else:
         from periodfind.cpu import ConditionalEntropy as _Cls
@@ -98,8 +98,8 @@ def AOV(**kwargs):
     Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
     are forwarded to the backend class constructor.
     """
-    device = _resolve_device(kwargs.pop('device', None))
-    if device == 'gpu':
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
         from periodfind.gpu import AOV as _Cls
     else:
         from periodfind.cpu import AOV as _Cls
@@ -112,8 +112,8 @@ def LombScargle(**kwargs):
     Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
     are forwarded to the backend class constructor.
     """
-    device = _resolve_device(kwargs.pop('device', None))
-    if device == 'gpu':
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
         from periodfind.gpu import LombScargle as _Cls
     else:
         from periodfind.cpu import LombScargle as _Cls
@@ -126,8 +126,8 @@ def FPW(**kwargs):
     Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
     are forwarded to the backend class constructor.
     """
-    device = _resolve_device(kwargs.pop('device', None))
-    if device == 'gpu':
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
         from periodfind.gpu import FPW as _Cls
     else:
         from periodfind.cpu import FPW as _Cls
@@ -193,14 +193,8 @@ class Statistics:
     significance : float
         Significance statistic, computed according to the significance_type
     """
-    def __init__(self,
-                 params,
-                 value,
-                 mean,
-                 std,
-                 median,
-                 mad,
-                 significance_type='stdmean'):
+
+    def __init__(self, params, value, mean, std, median, mad, significance_type="stdmean"):
         self.params = params
         self.value = value
         self.mean = mean
@@ -217,24 +211,25 @@ class Statistics:
 
     @property
     def significance(self):
-        if self.significance_type == 'stdmean':
+        if self.significance_type == "stdmean":
             return abs(self.value - self.mean) / self.std
-        elif self.significance_type == 'madmedian':
+        elif self.significance_type == "madmedian":
             return abs(self.value - self.median) / self.mad
         else:
-            raise NotImplementedError('Statistic ' + self.significance_type +
-                                      ' not implemented')
+            raise NotImplementedError("Statistic " + self.significance_type + " not implemented")
 
     @staticmethod
-    def statistics_from_data(data,
-                             params,
-                             use_max,
-                             mean=None,
-                             std=None,
-                             median=None,
-                             mad=None,
-                             n=1,
-                             significance_type='stdmean'):
+    def statistics_from_data(
+        data,
+        params,
+        use_max,
+        mean=None,
+        std=None,
+        median=None,
+        mad=None,
+        n=1,
+        significance_type="stdmean",
+    ):
         """Constructs statistics objects from a periodogram.
 
         Parameters
@@ -279,7 +274,7 @@ class Statistics:
         for i in range(n):
             idx = tuple(dim[i] for dim in idxs)
             idxs_t.append(idx)
-        
+
         values = data[idxs]
 
         # Calculate the data-wide statistics
@@ -293,7 +288,7 @@ class Statistics:
             mad = np.median(np.abs(data - median))
 
         best = []
-        for (idx, val) in zip(idxs_t, values):
+        for idx, val in zip(idxs_t, values):
             param = [params[i][idx[i]] for i in range(len(params))]
             best.append(
                 Statistics(
@@ -304,7 +299,8 @@ class Statistics:
                     median,
                     mad,
                     significance_type,
-                ))
+                )
+            )
 
         # Sort by value so most significant is first
         best.sort(key=lambda s: s.value, reverse=use_max)
@@ -366,6 +362,7 @@ class Periodogram:
     Computes parameters on demand, and does not cache them, so statistics
     should be stored if necessary.
     """
+
     def __init__(self, periodogram, params, use_max):
         self.use_max = use_max
         self.data = periodogram
@@ -376,25 +373,26 @@ class Periodogram:
         self.mad = None
 
     def __repr__(self):
-        shape = self.data.shape if hasattr(self.data, 'shape') else '?'
-        return (
-            f"Periodogram(shape={shape}, use_max={self.use_max})"
-        )
+        shape = self.data.shape if hasattr(self.data, "shape") else "?"
+        return f"Periodogram(shape={shape}, use_max={self.use_max})"
 
     def _calc_mean(self):
         if self.mean is None:
             self.mean = np.mean(self.data)
+
     def _calc_std(self):
         if self.std is None:
             self.std = np.std(self.data)
+
     def _calc_median(self):
         if self.median is None:
             self.median = np.median(self.data)
+
     def _calc_mad(self):
         if self.mad is None:
             self.mad = np.median(np.abs(self.data - self.median))
 
-    def best_params(self, n=1, significance_type='stdmean'):
+    def best_params(self, n=1, significance_type="stdmean"):
         """Returns the best parameters of the periodogram.
 
         Computes the best parameters of the periodogram, returning them as
@@ -418,7 +416,7 @@ class Periodogram:
         self._calc_std()
         self._calc_median()
         self._calc_mad()
-        
+
         return Statistics.statistics_from_data(
             self.data,
             self.params,
@@ -428,5 +426,5 @@ class Periodogram:
             median=self.median,
             mad=self.mad,
             n=n,
-            significance_type=significance_type)
-
+            significance_type=significance_type,
+        )
