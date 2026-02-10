@@ -23,15 +23,22 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python dependencies
-        run: pip install numpy cython pytest maturin
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install numpy cython pytest maturin
 
       - name: Build Rust CPU backend
         working-directory: rust
-        run: maturin develop --release
+        run: |
+          . ../.venv/bin/activate
+          maturin develop --release
 
       - name: Run unit and CPU tests
-        run: pytest tests/test_periodfind.py tests/test_cpu_standalone.py -v
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_periodfind.py tests/test_cpu_standalone.py -v
 
   cuda-tests:
     runs-on: [self-hosted, gpu]
@@ -47,15 +54,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python dependencies
-        run: pip install numpy cython pytest maturin
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install numpy cython pytest maturin
 
       - name: Build CUDA extensions
-        run: pip install -e .
+        run: |
+          . .venv/bin/activate
+          pip install -e .
 
       - name: Build Rust CPU backend
         working-directory: rust
-        run: maturin develop --release
+        run: |
+          . ../.venv/bin/activate
+          maturin develop --release
 
       - name: Run full test suite
-        run: pytest tests/ -v --ignore=tests/bench_cuda_opts.py --ignore=tests/bench_cpu_vs_cuda.py
+        run: |
+          . .venv/bin/activate
+          pytest tests/ -v --ignore=tests/bench_cuda_opts.py --ignore=tests/bench_cpu_vs_cuda.py
