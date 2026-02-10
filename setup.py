@@ -209,7 +209,7 @@ setup(name="periodfind",
           'numpy',
       ],
       keywords=['astronomy'],
-      packages=['periodfind'],
+      packages=['periodfind', 'periodfind.cpu', 'periodfind.gpu'],
       ext_modules=extensions,
       cmdclass={'build_ext': custom_build_ext},
       zip_safe=False)

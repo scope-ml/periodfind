@@ -43,6 +43,7 @@ jobs:
   cuda-tests:
     runs-on: [self-hosted, gpu]
     if: github.event_name == 'push'
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

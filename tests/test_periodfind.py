@@ -8,6 +8,8 @@ Run with: pytest tests/ -v
 GPU tests are skipped automatically if CUDA extensions aren't available.
 """
 
+import subprocess
+
 import numpy as np
 import pytest
 import warnings
@@ -22,7 +24,6 @@ try:
     from periodfind.gpu import AOV
     from periodfind.gpu import LombScargle
     # Verify an actual GPU is reachable by doing a trivial CUDA operation
-    import subprocess
     ret = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
     if ret.returncode == 0:
         HAS_GPU = True
