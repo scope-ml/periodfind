@@ -1,14 +1,18 @@
 use numpy::ndarray::{Array2, Array3};
 use numpy::{
-    IntoPyArray, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray3, PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray3,
+    PyUntypedArrayMethods,
 };
 use pyo3::prelude::*;
 
 mod aov;
+mod basicstats;
 mod ce;
+mod dmdt;
 mod fold;
 mod fourier;
 mod fpw;
+mod highcadence;
 mod ls;
 mod peaks;
 
@@ -456,6 +460,152 @@ fn calc_fpw_peaks_batched<'py>(
 }
 
 // ===========================================================================
+// High-cadence removal
+// ===========================================================================
+
+/// Batch high-cadence removal across multiple light curves.
+///
+/// Returns a list of (times, mags, errs) tuples, each filtered to keep only
+/// points separated by at least `cadence_minutes` minutes.
+#[pyfunction]
+fn remove_high_cadence_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    cadence_minutes: f32,
+) -> PyResult<Vec<(Py<PyArray1<f32>>, Py<PyArray1<f32>>, Py<PyArray1<f32>>)>> {
+    let cadence_days = cadence_minutes / 1440.0;
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let results = py.allow_threads(|| {
+        highcadence::remove_high_cadence_batch(&times_vecs, &mags_vecs, &errs_vecs, cadence_days)
+    });
+
+    Ok(results
+        .into_iter()
+        .map(|(t, m, e)| {
+            (
+                PyArray1::from_vec(py, t).into(),
+                PyArray1::from_vec(py, m).into(),
+                PyArray1::from_vec(py, e).into(),
+            )
+        })
+        .collect())
+}
+
+// ===========================================================================
+// dm-dt histograms
+// ===========================================================================
+
+/// Compute batched dm-dt histograms.
+///
+/// Returns a 3D numpy array of shape (n_curves, n_dm_bins, n_dt_bins),
+/// L2-normalised per curve.
+#[pyfunction]
+fn compute_dmdt_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    dt_edges: PyReadonlyArray1<'py, f32>,
+    dm_edges: PyReadonlyArray1<'py, f32>,
+) -> PyResult<Py<PyArray3<f32>>> {
+    let dt_edges_s = dt_edges.as_slice()?;
+    let dm_edges_s = dm_edges.as_slice()?;
+    let n_curves = times_list.len();
+    let n_dt_bins = if dt_edges_s.len() > 1 {
+        dt_edges_s.len() - 1
+    } else {
+        0
+    };
+    let n_dm_bins = if dm_edges_s.len() > 1 {
+        dm_edges_s.len() - 1
+    } else {
+        0
+    };
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        dmdt::compute_dmdt_batch(&times_vecs, &mags_vecs, dt_edges_s, dm_edges_s)
+    });
+
+    let mut output = Array3::<f32>::zeros((n_curves, n_dm_bins, n_dt_bins));
+    for ci in 0..n_curves {
+        let offset = ci * n_dm_bins * n_dt_bins;
+        for dm in 0..n_dm_bins {
+            for dt in 0..n_dt_bins {
+                output[[ci, dm, dt]] = flat[offset + dm * n_dt_bins + dt];
+            }
+        }
+    }
+
+    Ok(output.into_pyarray(py).into())
+}
+
+// ===========================================================================
+// Basic statistics
+// ===========================================================================
+
+/// Compute batched basic light curve statistics.
+///
+/// Returns a 2D numpy array of shape (n_curves, 22).
+#[pyfunction]
+fn calc_basic_stats_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<Py<PyArray2<f32>>> {
+    let n_curves = times_list.len();
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py
+        .allow_threads(|| basicstats::calc_basic_stats_batch(&times_vecs, &mags_vecs, &errs_vecs));
+
+    let n_feat = basicstats::NUM_BASIC_STATS;
+    let mut output = Array2::<f32>::zeros((n_curves, n_feat));
+    for i in 0..n_curves {
+        for j in 0..n_feat {
+            output[[i, j]] = flat[i * n_feat + j];
+        }
+    }
+
+    Ok(output.into_pyarray(py).into())
+}
+
+// ===========================================================================
 // Module registration
 // ===========================================================================
 
@@ -474,5 +624,9 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_aov_peaks_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_ls_peaks_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fpw_peaks_batched, m)?)?;
+    // Feature extraction
+    m.add_function(wrap_pyfunction!(remove_high_cadence_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_dmdt_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_basic_stats_batched, m)?)?;
     Ok(())
 }

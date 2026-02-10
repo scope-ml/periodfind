@@ -157,6 +157,43 @@ def FourierDecomposition(**kwargs):
     return _Cls(**kwargs)
 
 
+def DmDt(**kwargs):
+    """Create a dm-dt histogram feature extractor (CPU-only)."""
+    kwargs.pop("device", None)
+    from periodfind.cpu import DmDt as _Cls
+
+    return _Cls(**kwargs)
+
+
+def BasicStats(**kwargs):
+    """Create a basic statistics extractor (CPU-only)."""
+    kwargs.pop("device", None)
+    from periodfind.cpu import BasicStats as _Cls
+
+    return _Cls(**kwargs)
+
+
+def remove_high_cadence(times, mags, errs, cadence_minutes=30.0):
+    """Batch high-cadence removal via Rust.
+
+    Parameters
+    ----------
+    times : list of ndarray (float32)
+    mags : list of ndarray (float32)
+    errs : list of ndarray (float32)
+    cadence_minutes : float, default=30.0
+
+    Returns
+    -------
+    list of (ndarray, ndarray, ndarray)
+        Filtered (times, mags, errs) tuples.
+    """
+    from periodfind.cpu import RemoveHighCadence as _Cls
+
+    rhc = _Cls(cadence_minutes=cadence_minutes)
+    return rhc.calc(times, mags, errs)
+
+
 class Statistics:
     """Stores statistics about a single set of parameters.
 

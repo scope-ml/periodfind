@@ -8,6 +8,7 @@ import numpy as np
 from periodfind_cpu import (
     calc_aov_batched,
     calc_aov_peaks_batched,
+    calc_basic_stats_batched,
     calc_ce_batched,
     calc_ce_peaks_batched,
     calc_fourier_batched,
@@ -15,7 +16,9 @@ from periodfind_cpu import (
     calc_fpw_peaks_batched,
     calc_ls_batched,
     calc_ls_peaks_batched,
+    compute_dmdt_batched,
     find_top_peaks_batched,  # noqa: F401  (public API)
+    remove_high_cadence_batched,
 )
 
 from periodfind import Periodogram, Statistics
@@ -559,3 +562,121 @@ class FourierDecomposition:
             )
 
         return calc_fourier_batched(times, mags, errs, periods)
+
+
+class DmDt:
+    """dm-dt histogram feature extractor (CPU backend).
+
+    Computes L2-normalised 2D histograms of pairwise magnitude differences
+    vs. time differences for each light curve.
+    """
+
+    def calc(self, times, mags, dt_edges, dm_edges):
+        """Compute dm-dt histograms for a batch of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray (float32)
+            List of light curve times.
+        mags : list of ndarray (float32)
+            List of light curve magnitudes.
+        dt_edges : ndarray (float32)
+            Sorted bin edges for time differences.
+        dm_edges : ndarray (float32)
+            Sorted bin edges for magnitude differences.
+
+        Returns
+        -------
+        ndarray of shape (n_curves, n_dm_bins, n_dt_bins)
+        """
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+        dt_edges = np.asarray(dt_edges, dtype=np.float32)
+        dm_edges = np.asarray(dm_edges, dtype=np.float32)
+        return compute_dmdt_batched(times, mags, dt_edges, dm_edges)
+
+
+class BasicStats:
+    """Light curve basic statistics extractor (CPU backend).
+
+    Computes 22 summary statistics per light curve.
+    """
+
+    STAT_NAMES = [
+        "N",
+        "median",
+        "wmean",
+        "chi2red",
+        "RoMS",
+        "wstd",
+        "NormPeaktoPeakamp",
+        "NormExcessVar",
+        "medianAbsDev",
+        "iqr",
+        "i60r",
+        "i70r",
+        "i80r",
+        "i90r",
+        "skew",
+        "smallkurt",
+        "invNeumann",
+        "WelchI",
+        "StetsonJ",
+        "StetsonK",
+        "AD",
+        "SW",
+    ]
+
+    def calc(self, times, mags, errs):
+        """Compute basic statistics for a batch of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray (float32)
+            List of light curve times.
+        mags : list of ndarray (float32)
+            List of light curve magnitudes.
+        errs : list of ndarray (float32)
+            List of per-point magnitude uncertainties.
+
+        Returns
+        -------
+        ndarray of shape (n_curves, 22)
+        """
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+        ensure_float32(errs, "errs")
+        return calc_basic_stats_batched(times, mags, errs)
+
+
+class RemoveHighCadence:
+    """High-cadence point removal (CPU backend).
+
+    Filters light curves to keep only points separated by at least
+    a given cadence.
+    """
+
+    def __init__(self, cadence_minutes=30.0):
+        self.cadence_minutes = cadence_minutes
+
+    def calc(self, times, mags, errs):
+        """Remove high-cadence points from a batch of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray (float32)
+            List of light curve times.
+        mags : list of ndarray (float32)
+            List of light curve magnitudes.
+        errs : list of ndarray (float32)
+            List of per-point magnitude uncertainties.
+
+        Returns
+        -------
+        list of (ndarray, ndarray, ndarray)
+            Filtered (times, mags, errs) tuples.
+        """
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+        ensure_float32(errs, "errs")
+        return remove_high_cadence_batched(times, mags, errs, self.cadence_minutes)
