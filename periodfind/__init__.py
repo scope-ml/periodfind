@@ -1,4 +1,3 @@
-import warnings
 import numpy as np
 
 # Copyright 2020 California Institute of Technology. All rights reserved.
@@ -85,6 +84,12 @@ class Statistics:
         self.mad = mad
         self.significance_type = significance_type
 
+    def __repr__(self):
+        return (
+            f"Statistics(params={self.params}, value={self.value:.6g}, "
+            f"significance_type='{self.significance_type}')"
+        )
+
     @property
     def significance(self):
         if self.significance_type == 'stdmean':
@@ -153,13 +158,13 @@ class Statistics:
         values = data[idxs]
 
         # Calculate the data-wide statistics
-        if mean == None:
+        if mean is None:
             mean = np.mean(data)
-        if std == None:
+        if std is None:
             std = np.std(data)
-        if median == None:
+        if median is None:
             median = np.median(data)
-        if mad == None:
+        if mad is None:
             mad = np.median(np.abs(data - median))
 
         best = []
@@ -245,15 +250,24 @@ class Periodogram:
         self.median = None
         self.mad = None
 
-    def _calc_mean(self):
-        self.mean = np.mean(self.data)
-    def _calc_std(self):
-        self.std = np.std(self.data)
-    def _calc_median(self):
-        self.median = np.median(self.data)
-    def _calc_mad(self):
-        self.mad = np.median(np.abs(self.data - self.median))
+    def __repr__(self):
+        shape = self.data.shape if hasattr(self.data, 'shape') else '?'
+        return (
+            f"Periodogram(shape={shape}, use_max={self.use_max})"
+        )
 
+    def _calc_mean(self):
+        if self.mean is None:
+            self.mean = np.mean(self.data)
+    def _calc_std(self):
+        if self.std is None:
+            self.std = np.std(self.data)
+    def _calc_median(self):
+        if self.median is None:
+            self.median = np.median(self.data)
+    def _calc_mad(self):
+        if self.mad is None:
+            self.mad = np.median(np.abs(self.data - self.median))
 
     def best_params(self, n=1, significance_type='stdmean'):
         """Returns the best parameters of the periodogram.
@@ -291,6 +305,3 @@ class Periodogram:
             n=n,
             significance_type=significance_type)
 
-def _py_warn_periodfind(message, type):
-    """Wrapper around warnings.warn for Cython code."""
-    warnings.warn(message, type, stacklevel=2)

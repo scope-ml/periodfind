@@ -10,9 +10,9 @@ Provides an interface for analyzing light curves using Lomb-Scargle
 periodograms.
 """
 
-import warnings
 import numpy as np
-from periodfind import Statistics, Periodogram, _py_warn_periodfind
+from periodfind import Statistics, Periodogram
+from periodfind._utils import prepare_magnitudes, validate_inputs, ensure_float32
 
 cimport numpy as np
 from libc.stddef cimport size_t
@@ -24,7 +24,7 @@ np.import_array()
 cdef extern from "./cuda/ls.h":
     cdef cppclass CppLombScargle "LombScargle":
         CppLombScargle()
-        
+
         void CalcLSBatched(const vector[float*]& times,
                            const vector[float*]& mags,
                            const vector[size_t]& lengths,
@@ -33,9 +33,6 @@ cdef extern from "./cuda/ls.h":
                            const size_t num_periods,
                            const size_t num_p_dts,
                            float* per_out) const;
-
-def __py_warn_ls(message, type):
-    warnings.warn(message, type, stacklevel=2)
 
 cdef class LombScargle:
     """Lomb-Scargle periodogram light curve analysis.
@@ -48,6 +45,10 @@ cdef class LombScargle:
 
     def __cinit__(self):
         self.ls = new CppLombScargle()
+
+    def __dealloc__(self):
+        if self.ls is not NULL:
+            del self.ls
 
     def calc(self,
              list times,
@@ -69,19 +70,19 @@ cdef class LombScargle:
         ----------
         times : list of ndarray
             List of light curve times.
-        
+
         mags : list of ndarray
             List of light curve magnitudes.
-        
+
         periods : ndarray
             Array of trial periods
-        
+
         period_dts : ndarray
             Array of trial period time derivatives
-        
+
         output : {'stats', 'periodogram'}, default='stats'
             Type of output that should be returned
-        
+
         normalize : bool, default=False
             Whether to normalize the light curve magnitudes. If true, light
             curve magnitudes will be normalized to a (0, 1) range
@@ -92,12 +93,12 @@ cdef class LombScargle:
 
         n_stats : int, default=1
             Number of output `Statistics` to return if `output='stats'`
-        
+
         significance_type : {'stdmean', 'madmedian'}, default='stdmean'
             Specifies the significance statistic that should be used. See the
             documentation for the `Statistics` class for more information.
             Used only if `output='stats'`.
-        
+
         Returns
         -------
         data : list of Statistics or list of Periodogram
@@ -112,16 +113,16 @@ cdef class LombScargle:
         The times and magnitudes arrays must be given such that the pair
         `(times[i], magnitudes[i])` gives the `i`th light curve. As such,
         `times[i]` and `magnitudes[i]` must have the same length for all `i`.
-        
+
         Although normalization is not required for the Lomb-Scargle
         calculation, it can help reduce floating point error, so it is
         recommended for light curves with large magnitude values.
         """
-        
-        # Make sure the number of times and mags matches 
-        if len(times) != len(mags):
-            return np.zeros([0, 0, 0], dtype=np.float32)
-        
+
+        validate_inputs(times, mags)
+        ensure_float32(times, 'times')
+        ensure_float32(mags, 'mags')
+
         cdef np.ndarray[ndim=1, dtype=np.float32_t] time_arr
         cdef vector[float*] times_ptrs
         cdef vector[size_t] times_lens
@@ -130,23 +131,7 @@ cdef class LombScargle:
             times_ptrs.push_back(&time_arr[0])
             times_lens.push_back(len(time_arr))
 
-        if center and normalize:
-            _py_warn_periodfind(
-                'Center and normalize are conflicting settings. Normalize will be ignored.',
-                RuntimeWarning)
-
-        mags_use = []
-        if center:
-            for mag in mags:
-                mags_use.append(mag - np.mean(mag))
-        elif normalize:
-            for mag in mags:
-                min_v = np.min(mag)
-                max_v = np.max(mag)
-                scaled = ((mag - min_v) / (max_v - min_v)) * 0.999 + 5e-4
-                mags_use.append(scaled)
-        else:
-            mags_use = mags
+        mags_use = prepare_magnitudes(mags, center, normalize)
 
         cdef np.ndarray[ndim=1, dtype=np.float32_t] mag_arr
         cdef vector[float*] mags_ptrs
@@ -155,10 +140,6 @@ cdef class LombScargle:
             mag_arr = mag_obj
             mags_ptrs.push_back(&mag_arr[0])
             mags_lens.push_back(len(mag_arr))
-
-        # Make sure the individual lengths match
-        if any(t != m for t, m in zip(times_lens, mags_lens)):
-            return np.zeros([0, 0, 0], dtype=np.float32)
 
         n_per = len(periods)
         n_pdt = len(period_dts)
@@ -171,7 +152,7 @@ cdef class LombScargle:
             &periods[0], &period_dts[0], n_per, n_pdt,
             &ls_view[0, 0, 0]
         )
-        
+
         if output == 'stats':
             all_stats = []
             for i in range(len(times)):
@@ -184,10 +165,12 @@ cdef class LombScargle:
                 )
 
                 all_stats.append(stats)
-            
+
             return all_stats
         elif output == 'periodogram':
             return [Periodogram(data, [periods, period_dts], True)
                     for data in ls_ndarr]
         else:
-            raise NotImplementedError('Only "stats" output is implemented')
+            raise NotImplementedError(
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats" or "periodogram".')

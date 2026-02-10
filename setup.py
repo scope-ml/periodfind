@@ -26,9 +26,12 @@ def locate_cuda():
     everything is based on finding 'nvcc' in the PATH.
     """
 
-    # First check if the CUDAHOME env variable is in use
+    # First check if the CUDAHOME or CUDA_HOME env variable is in use
     if 'CUDAHOME' in os.environ:
         home = os.environ['CUDAHOME']
+        nvcc = pjoin(home, 'bin', 'nvcc')
+    elif 'CUDA_HOME' in os.environ:
+        home = os.environ['CUDA_HOME']
         nvcc = pjoin(home, 'bin', 'nvcc')
     else:
         # Otherwise, search the PATH for NVCC
@@ -37,7 +40,7 @@ def locate_cuda():
             raise EnvironmentError(
                 'The nvcc binary could not be '
                 'located in your $PATH. Either add it to your path, '
-                'or set $CUDAHOME')
+                'or set $CUDAHOME / $CUDA_HOME')
         home = os.path.dirname(os.path.dirname(nvcc))
 
     cudaconfig = {
@@ -109,12 +112,12 @@ except AttributeError:
     numpy_include = numpy.get_numpy_include()
 
 # Arguments for both NVCC and GCC
-compiler_flags = ['-std=c++11', '-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION']
+compiler_flags = ['-std=c++14', '-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION']
 gcc_only_flags = []
-nvcc_only_flags = ['-c', '--compiler-options', "'-fPIC'"]
+nvcc_only_flags = ['-c', '--compiler-options', "'-fPIC'", '-use_fast_math']
 
 # Generate the gencode arguments
-compute_capabilities = [35, 37, 50, 52, 60, 61, 70, 75]
+compute_capabilities = [50, 52, 60, 61, 70, 75, 80, 86, 89, 90]
 cuda_arch_flags = [
     f'-gencode=arch=compute_{cap},code=sm_{cap}'
     for cap in compute_capabilities
@@ -170,7 +173,7 @@ extensions = [
 ]
 
 setup(name="periodfind",
-      version='0.0.5',
+      version='0.0.6',
       description='GPU-accelerated period finding utilities',
       url='https://github.com/ZwickyTransientFacility/periodfind',
       author='Ethan Jaszewski',
@@ -187,7 +190,7 @@ setup(name="periodfind",
           'Topic :: Software Development :: Libraries :: Python Modules',
           'Environment :: GPU :: NVIDIA CUDA',
       ],
-      python_requires='>=3.6',
+      python_requires='>=3.8',
       install_requires=[
           'cython',
           'numpy',

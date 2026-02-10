@@ -105,16 +105,16 @@ __host__ __device__ size_t ConditionalEntropy::BinIndex(size_t phase_bin,
  * @param h_params histogram parameters
  * @param hists array of output histograms
  */
-__global__ void FoldBinKernel(const float* times,
-                              const float* mags,
+__global__ void FoldBinKernel(const float* __restrict__ times,
+                              const float* __restrict__ mags,
                               const size_t length,
-                              const float* periods,
-                              const float* period_dts,
+                              const float* __restrict__ periods,
+                              const float* __restrict__ period_dts,
                               const ConditionalEntropy h_params,
-                              float* hists) {
+                              float* __restrict__ hists) {
     // Histogram which this block will produce.
     const size_t block_id = blockIdx.x * gridDim.y + blockIdx.y;
-    float* block_hist = &hists[h_params.NumBins() * block_id];
+    float* __restrict__ block_hist = &hists[h_params.NumBins() * block_id];
 
     // Period and period time derivative for this block.
     const float period = periods[blockIdx.x];
@@ -187,49 +187,72 @@ __global__ void FoldBinKernel(const float* times,
  * @param h_params histogram parameters
  * @param ce_vals output array of conditional entropy values
  */
-__global__ void ConditionalEntropyKernel(const float* hists,
+__global__ void ConditionalEntropyKernel(const float* __restrict__ hists,
                                          const size_t num_hists,
                                          const ConditionalEntropy h_params,
-                                         float* ce_vals) {
-    // Shared memory scratch space
-    extern __shared__ float scratch[];
+                                         float* __restrict__ ce_vals) {
+    // Shared memory layout: scratch space + per-histogram reduction buffer
+    extern __shared__ float shared_mem[];
+    float* scratch = shared_mem;
+
+    // Max histograms this block can touch: (blockDim.x / NumPhaseBins) + 2
+    const size_t max_hists_per_block =
+        (blockDim.x / h_params.NumPhaseBins()) + 2;
+    float* sh_ce = &shared_mem[blockDim.x];
 
     // Which histogram row this thread is summing
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t tid = threadIdx.x;
+
+    // First histogram index covered by this block
+    size_t first_global = blockIdx.x * blockDim.x;
+    size_t first_hist = first_global / h_params.NumPhaseBins();
+
+    // Zero the shared reduction buffer
+    for (size_t i = tid; i < max_hists_per_block; i += blockDim.x) {
+        sh_ce[i] = 0.0f;
+    }
+    __syncthreads();
 
     // Don't compute for out-of-bounds histograms
     if (idx / h_params.NumPhaseBins() >= num_hists) {
-        return;
+        // Still need to participate in syncthreads below
+    } else {
+        // Index in the histogram array corresponding to the start of this row
+        const size_t offset = idx * h_params.NumMagBins();
+
+        // Compute p(phi_j)
+        scratch[tid] = 0;
+        for (size_t i = 0; i < h_params.NumMagBins(); i++) {
+            scratch[tid] += hists[i + offset];
+        }
+
+        // Compute per-phase-bin conditional entropy
+        float p_j = scratch[tid];
+        float ce_contrib = 0.0f;
+        for (size_t i = 0; i < h_params.NumMagBins(); i++) {
+            float p_ij = hists[i + offset];
+            if (p_ij != 0) {
+                ce_contrib += p_ij * logf(p_j / p_ij);
+            }
+        }
+
+        // Accumulate into shared-memory per-histogram buffer
+        size_t ce_idx = idx / h_params.NumPhaseBins();
+        size_t local_hist = ce_idx - first_hist;
+        atomicAdd(&sh_ce[local_hist], ce_contrib);
     }
 
-    // Which shared memory location this thread uses
-    size_t tid = threadIdx.x;
+    __syncthreads();
 
-    // Index in the histogram array corresponding to the start of this row
-    const size_t offset = idx * h_params.NumMagBins();
-
-    // Accumulate into shared memory (compute p(phi_j))
-    scratch[tid] = 0;
-    for (size_t i = 0; i < h_params.NumMagBins(); i++) {
-        scratch[tid] += hists[i + offset];
-    }
-
-    // Compute per-phase-bin conditional entropy
-    // TODO: remove use of global mem?
-    float p_j = scratch[tid];  // Store p_j
-    scratch[tid] = 0;          // Reset shmem before summing
-    for (size_t i = 0; i < h_params.NumMagBins(); i++) {
-        float p_ij = hists[i + offset];
-        if (p_ij != 0) {
-            scratch[tid] += p_ij * logf(p_j / p_ij);
+    // Write accumulated shared-memory results to global memory
+    // One thread per histogram writes the result
+    for (size_t i = tid; i < max_hists_per_block; i += blockDim.x) {
+        size_t global_hist = first_hist + i;
+        if (global_hist < num_hists && sh_ce[i] != 0.0f) {
+            atomicAdd(&ce_vals[global_hist], sh_ce[i]);
         }
     }
-
-    // Accumulate per-phase-bin conditional entropy into total conditional
-    // entropy for the histogram.
-    // TODO: Replace with shared memory reduction of some kind. *yikes*
-    size_t ce_idx = idx / h_params.NumPhaseBins();
-    atomicAdd(&ce_vals[ce_idx], scratch[tid]);
 }
 
 //
@@ -291,7 +314,7 @@ float* ConditionalEntropy::FoldAndBin(const float* times,
     gpuErrchk(cudaMemcpy(dev_mags, mags, data_bytes, cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
               cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(dev_periods, period_dts, num_p_dts * sizeof(float),
+    gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
               cudaMemcpyHostToDevice));
 
     float* dev_hists =
@@ -321,10 +344,13 @@ float* ConditionalEntropy::DeviceCalcCEFromHists(const float* hists,
 
     const size_t n_t = 512;
     const size_t n_b = ((num_hists * NumPhaseBins()) / n_t) + 1;
+    // Shared memory: scratch (n_t floats) + per-histogram reduction buffer
+    const size_t max_hists_per_block = (n_t / NumPhaseBins()) + 2;
+    const size_t shared_bytes = (n_t + max_hists_per_block) * sizeof(float);
 
     // NOTE: A ConditionalEntropy object is small enough that we can pass it in
     //       the registers by dereferencing it.
-    ConditionalEntropyKernel<<<n_b, n_t, n_t * sizeof(float)>>>(
+    ConditionalEntropyKernel<<<n_b, n_t, shared_bytes>>>(
         hists, num_hists, *this, dev_ces);
 
     return dev_ces;
@@ -388,9 +414,6 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
                                            const size_t num_periods,
                                            const size_t num_p_dts,
                                            float* ce_out) const {
-    // TODO: Use async memory transferring
-    // TODO: Look at ways of batching data transfer.
-
     // Size of one CE out array, and total CE output size.
     size_t ce_out_size = num_periods * num_p_dts * sizeof(float);
     size_t ce_size_total = ce_out_size * lengths.size();
@@ -405,15 +428,9 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
     gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
                          cudaMemcpyHostToDevice));
 
-    // Intermediate histogram memory
+    // Intermediate memory sizes
     size_t num_hists = num_periods * num_p_dts;
     size_t hist_bytes = NumBins() * sizeof(float) * num_hists;
-    float* dev_hists;
-    gpuErrchk(cudaMalloc(&dev_hists, hist_bytes));
-
-    // Intermediate conditional entropy memory
-    float* dev_ces;
-    gpuErrchk(cudaMalloc(&dev_ces, ce_out_size));
 
     // Kernel launch information for the fold & bin step
     const size_t num_threads_fb = 256;
@@ -424,52 +441,78 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
     const size_t num_threads_ce = 256;
     const size_t num_blocks_ce =
         ((num_hists * NumPhaseBins()) / num_threads_ce) + 1;
-    const size_t shared_bytes_ce = num_threads_ce * sizeof(float);
+    const size_t max_hists_per_block_ce = (num_threads_ce / NumPhaseBins()) + 2;
+    const size_t shared_bytes_ce =
+        (num_threads_ce + max_hists_per_block_ce) * sizeof(float);
 
     // Buffer size (large enough for longest light curve)
     auto max_length = std::max_element(lengths.begin(), lengths.end());
     const size_t buffer_length = *max_length;
     const size_t buffer_bytes = sizeof(float) * buffer_length;
 
-    float* dev_times_buffer;
-    float* dev_mags_buffer;
-    gpuErrchk(cudaMalloc(&dev_times_buffer, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_mags_buffer, buffer_bytes));
+    // Create 2 CUDA streams for double-buffered async transfers
+    const int NUM_STREAMS = 2;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaStreamCreate(&streams[s]));
+    }
+
+    // Allocate double-buffered device memory
+    float* dev_times_buf[NUM_STREAMS];
+    float* dev_mags_buf[NUM_STREAMS];
+    float* dev_hists_buf[NUM_STREAMS];
+    float* dev_ces_buf[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaMalloc(&dev_times_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_mags_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_hists_buf[s], hist_bytes));
+        gpuErrchk(cudaMalloc(&dev_ces_buf[s], ce_out_size));
+    }
 
     for (size_t i = 0; i < lengths.size(); i++) {
-        // Copy light curve into device buffer
+        int s = i % NUM_STREAMS;
+        cudaStream_t stream = streams[s];
+
+        // Copy light curve into device buffer (async)
         const size_t curve_bytes = lengths[i] * sizeof(float);
-        gpuErrchk(cudaMemcpy(dev_times_buffer, times[i], curve_bytes,
-                             cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(dev_mags_buffer, mags[i], curve_bytes,
-                             cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
+                                   cudaMemcpyHostToDevice, stream));
+        gpuErrchk(cudaMemcpyAsync(dev_mags_buf[s], mags[i], curve_bytes,
+                                   cudaMemcpyHostToDevice, stream));
 
         // Zero conditional entropy output
-        gpuErrchk(cudaMemset(dev_ces, 0, ce_out_size));
+        gpuErrchk(cudaMemsetAsync(dev_ces_buf[s], 0, ce_out_size, stream));
 
-        // NOTE: A ConditionalEntropy object is small enough that we can pass it
-        //       in the registers by dereferencing it.
-
-        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb>>>(
-            dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
-            dev_period_dts, *this, dev_hists);
+        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb,
+                        stream>>>(dev_times_buf[s], dev_mags_buf[s],
+                                  lengths[i], dev_periods, dev_period_dts,
+                                  *this, dev_hists_buf[s]);
 
         ConditionalEntropyKernel<<<num_blocks_ce, num_threads_ce,
-                                   shared_bytes_ce>>>(dev_hists, num_hists,
-                                                      *this, dev_ces);
+                                   shared_bytes_ce, stream>>>(
+            dev_hists_buf[s], num_hists, *this, dev_ces_buf[s]);
 
-        // Copy CE data back to host
-        gpuErrchk(cudaMemcpy(&ce_out[i * num_hists], dev_ces, ce_out_size,
-                             cudaMemcpyDeviceToHost));
+        // Copy CE data back to host (async)
+        gpuErrchk(cudaMemcpyAsync(&ce_out[i * num_hists], dev_ces_buf[s],
+                                   ce_out_size, cudaMemcpyDeviceToHost,
+                                   stream));
+    }
+
+    // Synchronize and clean up streams
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaStreamSynchronize(streams[s]));
     }
 
     // Free all of the GPU memory
     gpuErrchk(cudaFree(dev_periods));
     gpuErrchk(cudaFree(dev_period_dts));
-    gpuErrchk(cudaFree(dev_hists));
-    gpuErrchk(cudaFree(dev_ces));
-    gpuErrchk(cudaFree(dev_times_buffer));
-    gpuErrchk(cudaFree(dev_mags_buffer));
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaFree(dev_times_buf[s]));
+        gpuErrchk(cudaFree(dev_mags_buf[s]));
+        gpuErrchk(cudaFree(dev_hists_buf[s]));
+        gpuErrchk(cudaFree(dev_ces_buf[s]));
+        gpuErrchk(cudaStreamDestroy(streams[s]));
+    }
 }
 
 float* ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,

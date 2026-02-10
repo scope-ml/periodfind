@@ -1,4 +1,4 @@
-recursive-include src/ *
+recursive-include periodfind/ *
 include *.pxd
 include *.pyx
 include README.md

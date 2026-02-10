@@ -26,55 +26,81 @@ LombScargle::LombScargle() {}
 // CUDA Kernels
 //
 
-__global__ void LombScargleKernel(const float* times,
-                                  const float* mags,
+// Tile size for shared-memory light curve tiling
+#define LS_TILE_SIZE 256
+
+__global__ void LombScargleKernel(const float* __restrict__ times,
+                                  const float* __restrict__ mags,
                                   const size_t length,
-                                  const float* periods,
-                                  const float* period_dts,
+                                  const float* __restrict__ periods,
+                                  const float* __restrict__ period_dts,
                                   const size_t num_periods,
                                   const size_t num_period_dts,
                                   const LombScargle params,
-                                  float* periodogram) {
-    const size_t thread_x = threadIdx.x + blockIdx.x * blockDim.x;
-    const size_t thread_y = threadIdx.y + blockIdx.y * blockDim.y;
+                                  float* __restrict__ periodogram) {
+    // Shared memory for tiling light curve data
+    extern __shared__ float sh_data[];
+    float* sh_times = &sh_data[0];
+    float* sh_mags = &sh_data[LS_TILE_SIZE];
 
-    if (thread_x >= num_periods || thread_y >= num_period_dts) {
+    // One block per (period, period_dt) pair
+    const size_t period_idx = blockIdx.x;
+    const size_t pdt_idx = blockIdx.y;
+
+    if (period_idx >= num_periods || pdt_idx >= num_period_dts) {
         return;
     }
 
-    // Period and period time derivative
-    const float period = periods[thread_x];
-    const float period_dt = period_dts[thread_y];
-
-    // Time derivative correction factor.
+    const float period = periods[period_idx];
+    const float period_dt = period_dts[pdt_idx];
     const float pdt_corr = (period_dt / period) / 2;
 
-    float mag_cos = 0.0;
-    float mag_sin = 0.0;
-    float cos_cos = 0.0;
-    float cos_sin = 0.0;
+    // Per-thread accumulators
+    float mag_cos = 0.0f;
+    float mag_sin = 0.0f;
+    float cos_cos = 0.0f;
+    float cos_sin = 0.0f;
 
-    float cos, sin, i_part;
+    float cos_val, sin_val, i_part;
 
-    for (size_t idx = 0; idx < length; idx++) {
-        float t = times[idx];
-        float mag = mags[idx];
+    // Process the light curve in tiles
+    for (size_t tile_start = 0; tile_start < length; tile_start += LS_TILE_SIZE) {
+        size_t tile_end = tile_start + LS_TILE_SIZE;
+        if (tile_end > length) tile_end = length;
+        size_t tile_len = tile_end - tile_start;
 
-        float t_corr = t - pdt_corr * t * t;
-        float folded = fabsf(modff(t_corr / period, &i_part));
+        // Cooperatively load tile into shared memory
+        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            sh_times[i] = times[tile_start + i];
+            sh_mags[i] = mags[tile_start + i];
+        }
+        __syncthreads();
 
-        sincosf(TWO_PI * folded, &sin, &cos);
+        // Each thread accumulates over the entire tile
+        for (size_t i = 0; i < tile_len; i++) {
+            float t = sh_times[i];
+            float mag = sh_mags[i];
 
-        mag_cos += mag * cos;
-        mag_sin += mag * sin;
-        cos_cos += cos * cos;
-        cos_sin += cos * sin;
+            float t_corr = t - pdt_corr * t * t;
+            float folded = fabsf(modff(t_corr / period, &i_part));
+
+            sincosf(TWO_PI * folded, &sin_val, &cos_val);
+
+            mag_cos += mag * cos_val;
+            mag_sin += mag * sin_val;
+            cos_cos += cos_val * cos_val;
+            cos_sin += cos_val * sin_val;
+        }
+        __syncthreads();
     }
+
+    // Only thread 0 computes the final LS value (all threads have full sums)
+    if (threadIdx.x != 0) return;
 
     float sin_sin = static_cast<float>(length) - cos_cos;
 
     float cos_tau, sin_tau;
-    sincosf(0.5 * atan2f(2.0 * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
+    sincosf(0.5f * atan2f(2.0f * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
 
     float numerator_l = cos_tau * mag_cos + sin_tau * mag_sin;
     numerator_l *= numerator_l;
@@ -90,8 +116,8 @@ __global__ void LombScargleKernel(const float* times,
                           - 2 * cos_tau * sin_tau * cos_sin
                           + sin_tau * sin_tau * cos_cos;
 
-    periodogram[thread_x * num_period_dts + thread_y] =
-        0.5 * ((numerator_l / denominator_l) + (numerator_r / denominator_r));
+    periodogram[period_idx * num_period_dts + pdt_idx] =
+        0.5f * ((numerator_l / denominator_l) + (numerator_r / denominator_r));
 }
 
 //
@@ -109,17 +135,14 @@ float* LombScargle::DeviceCalcLS(const float* times,
     gpuErrchk(
         cudaMalloc(&periodogram, num_periods * num_p_dts * sizeof(float)));
 
-    const size_t x_threads = 256;
-    const size_t y_threads = 1;
-    const size_t x_blocks = ((num_periods + x_threads - 1) / x_threads);
-    const size_t y_blocks = ((num_p_dts + y_threads - 1) / y_threads);
+    // One block per (period, period_dt) pair
+    const size_t num_threads = 256;
+    const size_t shared_bytes = 2 * LS_TILE_SIZE * sizeof(float);
+    const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
-    const dim3 block_dim = dim3(x_threads, y_threads);
-    const dim3 grid_dim = dim3(x_blocks, y_blocks);
-
-    LombScargleKernel<<<grid_dim, block_dim>>>(times, mags, length, periods,
-                                               period_dts, num_periods,
-                                               num_p_dts, *this, periodogram);
+    LombScargleKernel<<<grid_dim, num_threads, shared_bytes>>>(
+        times, mags, length, periods, period_dts, num_periods, num_p_dts,
+        *this, periodogram);
 
     return periodogram;
 }
@@ -157,9 +180,6 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
                                 const size_t num_periods,
                                 const size_t num_p_dts,
                                 float* per_out) const {
-    // TODO: Use async memory transferring
-    // TODO: Look at ways of batching data transfer.
-
     // Size of one periodogram out array, and total periodogram output size.
     size_t per_points = num_periods * num_p_dts;
     size_t per_out_size = per_points * sizeof(float);
@@ -175,54 +195,71 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
                          cudaMemcpyHostToDevice));
 
-    // Intermediate conditional entropy memory
-    float* dev_per;
-    gpuErrchk(cudaMalloc(&dev_per, per_out_size));
-
-    // Kernel launch information
-    const size_t x_threads = 256;
-    const size_t y_threads = 1;
-    const size_t x_blocks = ((num_periods + x_threads - 1) / x_threads);
-    const size_t y_blocks = ((num_p_dts + y_threads - 1) / y_threads);
-    const dim3 block_dim = dim3(x_threads, y_threads);
-    const dim3 grid_dim = dim3(x_blocks, y_blocks);
+    // Kernel launch information: one block per (period, period_dt) pair
+    const size_t num_threads = 256;
+    const size_t shared_bytes = 2 * LS_TILE_SIZE * sizeof(float);
+    const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
     // Buffer size (large enough for longest light curve)
     auto max_length = std::max_element(lengths.begin(), lengths.end());
     const size_t buffer_length = *max_length;
     const size_t buffer_bytes = sizeof(float) * buffer_length;
 
-    float* dev_times_buffer;
-    float* dev_mags_buffer;
-    gpuErrchk(cudaMalloc(&dev_times_buffer, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_mags_buffer, buffer_bytes));
+    // Create 2 CUDA streams for double-buffered async transfers
+    const int NUM_STREAMS = 2;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaStreamCreate(&streams[s]));
+    }
+
+    // Allocate double-buffered device memory
+    float* dev_times_buf[NUM_STREAMS];
+    float* dev_mags_buf[NUM_STREAMS];
+    float* dev_per_buf[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaMalloc(&dev_times_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_mags_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_per_buf[s], per_out_size));
+    }
 
     for (size_t i = 0; i < lengths.size(); i++) {
-        // Copy light curve into device buffer
+        int s = i % NUM_STREAMS;
+        cudaStream_t stream = streams[s];
+
+        // Copy light curve into device buffer (async)
         const size_t curve_bytes = lengths[i] * sizeof(float);
-        cudaMemcpy(dev_times_buffer, times[i], curve_bytes,
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(dev_mags_buffer, mags[i], curve_bytes,
-                   cudaMemcpyHostToDevice);
+        gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
+                                   cudaMemcpyHostToDevice, stream));
+        gpuErrchk(cudaMemcpyAsync(dev_mags_buf[s], mags[i], curve_bytes,
+                                   cudaMemcpyHostToDevice, stream));
 
-        // Zero conditional entropy output
-        gpuErrchk(cudaMemset(dev_per, 0, per_out_size));
+        // Zero periodogram output
+        gpuErrchk(cudaMemsetAsync(dev_per_buf[s], 0, per_out_size, stream));
 
-        LombScargleKernel<<<grid_dim, block_dim>>>(
-            dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
-            dev_period_dts, num_periods, num_p_dts, *this, dev_per);
+        LombScargleKernel<<<grid_dim, num_threads, shared_bytes, stream>>>(
+            dev_times_buf[s], dev_mags_buf[s], lengths[i], dev_periods,
+            dev_period_dts, num_periods, num_p_dts, *this, dev_per_buf[s]);
 
-        // Copy periodogram back to host
-        cudaMemcpy(&per_out[i * per_points], dev_per, per_out_size,
-                   cudaMemcpyDeviceToHost);
+        // Copy periodogram back to host (async)
+        gpuErrchk(cudaMemcpyAsync(&per_out[i * per_points], dev_per_buf[s],
+                                   per_out_size, cudaMemcpyDeviceToHost,
+                                   stream));
+    }
+
+    // Synchronize and clean up streams
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaStreamSynchronize(streams[s]));
     }
 
     // Free all of the GPU memory
     gpuErrchk(cudaFree(dev_periods));
     gpuErrchk(cudaFree(dev_period_dts));
-    gpuErrchk(cudaFree(dev_per));
-    gpuErrchk(cudaFree(dev_times_buffer));
-    gpuErrchk(cudaFree(dev_mags_buffer));
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaFree(dev_times_buf[s]));
+        gpuErrchk(cudaFree(dev_mags_buf[s]));
+        gpuErrchk(cudaFree(dev_per_buf[s]));
+        gpuErrchk(cudaStreamDestroy(streams[s]));
+    }
 }
 
 float* LombScargle::CalcLSBatched(const std::vector<float*>& times,
