@@ -7,14 +7,49 @@ ls.pyx), but uses a Rust+Rayon backend that runs on the CPU.
 import numpy as np
 from periodfind_cpu import (
     calc_aov_batched,
+    calc_aov_peaks_batched,
     calc_ce_batched,
+    calc_ce_peaks_batched,
     calc_fourier_batched,
     calc_fpw_batched,
+    calc_fpw_peaks_batched,
     calc_ls_batched,
+    calc_ls_peaks_batched,
+    find_top_peaks_batched,  # noqa: F401  (public API)
 )
 
 from periodfind import Periodogram, Statistics
 from periodfind._utils import ensure_float32, prepare_magnitudes, validate_inputs
+
+N_PEAKS_DEFAULT = 32
+MIN_DISTANCE_DEFAULT = 1
+
+
+def _unravel_peaks(peak_indices, peak_values, periods, period_dts, n_peaks):
+    """Convert flat peak indices + values into a list of lists of Statistics."""
+    n_curves = peak_indices.shape[0]
+    n_pdts = len(period_dts)
+    results = []
+    for ci in range(n_curves):
+        curve_peaks = []
+        for pi in range(n_peaks):
+            flat_idx = peak_indices[ci, pi]
+            if flat_idx < 0:
+                break
+            p_idx = int(flat_idx // n_pdts)
+            d_idx = int(flat_idx % n_pdts)
+            curve_peaks.append(
+                Statistics(
+                    params=[float(periods[p_idx]), float(period_dts[d_idx])],
+                    value=float(peak_values[ci, pi]),
+                    mean=0.0,
+                    std=1.0,
+                    median=0.0,
+                    mad=1.0,
+                )
+            )
+        results.append(curve_peaks)
+    return results
 
 
 class ConditionalEntropy:
@@ -49,6 +84,8 @@ class ConditionalEntropy:
         center=False,
         n_stats=1,
         significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
     ):
         """Runs Conditional Entropy calculations on a list of light curves.
 
@@ -62,8 +99,10 @@ class ConditionalEntropy:
             Array of trial periods (float32).
         period_dts : ndarray
             Array of trial period time derivatives (float32).
-        output : {'stats', 'periodogram'}, default='stats'
-            Type of output to return.
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
+            Type of output to return.  ``'peaks'`` uses a streaming greedy
+            algorithm to return the top *n_peaks* without materialising the
+            full 3-D periodogram array, saving memory on large grids.
         normalize : bool, default=True
             Whether to normalize magnitudes to (0, 1).
         center : bool, default=False
@@ -72,16 +111,36 @@ class ConditionalEntropy:
             Number of top Statistics to return.
         significance_type : {'stdmean', 'madmedian'}, default='stdmean'
             Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance (in flattened period grid samples) between
+            accepted peaks.
 
         Returns
         -------
-        list of Statistics or list of Periodogram
+        list of Statistics, list of Periodogram, or list of list of Statistics
         """
         validate_inputs(times, mags)
         ensure_float32(times, "times")
         ensure_float32(mags, "mags")
 
         mags_use = prepare_magnitudes(mags, center, normalize)
+
+        if output == "peaks":
+            idx, val = calc_ce_peaks_batched(
+                times,
+                mags_use,
+                periods,
+                period_dts,
+                self.n_phase,
+                self.n_mag,
+                self.phase_bin_extent,
+                self.mag_bin_extent,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
 
         ces_ndarr = calc_ce_batched(
             times,
@@ -110,7 +169,8 @@ class ConditionalEntropy:
             return [Periodogram(data, [periods, period_dts], False) for data in ces_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
             )
 
 
@@ -140,6 +200,8 @@ class AOV:
         center=False,
         n_stats=1,
         significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
     ):
         """Runs Analysis-of-Variance calculations on a list of light curves.
 
@@ -153,7 +215,7 @@ class AOV:
             Array of trial periods (float32).
         period_dts : ndarray
             Array of trial period time derivatives (float32).
-        output : {'stats', 'periodogram'}, default='stats'
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
             Type of output to return.
         normalize : bool, default=False
             Whether to normalize magnitudes to (0, 1).
@@ -163,16 +225,33 @@ class AOV:
             Number of top Statistics to return.
         significance_type : {'stdmean', 'madmedian'}, default='stdmean'
             Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
 
         Returns
         -------
-        list of Statistics or list of Periodogram
+        list of Statistics, list of Periodogram, or list of list of Statistics
         """
         validate_inputs(times, mags)
         ensure_float32(times, "times")
         ensure_float32(mags, "mags")
 
         mags_use = prepare_magnitudes(mags, center, normalize)
+
+        if output == "peaks":
+            idx, val = calc_aov_peaks_batched(
+                times,
+                mags_use,
+                periods,
+                period_dts,
+                self.n_phase,
+                self.phase_bin_extent,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
 
         aovs_ndarr = calc_aov_batched(
             times,
@@ -199,7 +278,8 @@ class AOV:
             return [Periodogram(data, [periods, period_dts], True) for data in aovs_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
             )
 
 
@@ -220,6 +300,8 @@ class LombScargle:
         center=True,
         n_stats=1,
         significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
     ):
         """Runs Lomb-Scargle calculations on a list of light curves.
 
@@ -233,7 +315,7 @@ class LombScargle:
             Array of trial periods (float32).
         period_dts : ndarray
             Array of trial period time derivatives (float32).
-        output : {'stats', 'periodogram'}, default='stats'
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
             Type of output to return.
         normalize : bool, default=False
             Whether to normalize magnitudes to (0, 1).
@@ -243,16 +325,31 @@ class LombScargle:
             Number of top Statistics to return.
         significance_type : {'stdmean', 'madmedian'}, default='stdmean'
             Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
 
         Returns
         -------
-        list of Statistics or list of Periodogram
+        list of Statistics, list of Periodogram, or list of list of Statistics
         """
         validate_inputs(times, mags)
         ensure_float32(times, "times")
         ensure_float32(mags, "mags")
 
         mags_use = prepare_magnitudes(mags, center, normalize)
+
+        if output == "peaks":
+            idx, val = calc_ls_peaks_batched(
+                times,
+                mags_use,
+                periods,
+                period_dts,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
 
         ls_ndarr = calc_ls_batched(
             times,
@@ -277,7 +374,8 @@ class LombScargle:
             return [Periodogram(data, [periods, period_dts], True) for data in ls_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
             )
 
 
@@ -308,6 +406,8 @@ class FPW:
         center=False,
         n_stats=1,
         significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
     ):
         """Runs FPW calculations on a list of light curves.
 
@@ -324,7 +424,7 @@ class FPW:
         errs : list of ndarray or None, default=None
             List of per-point uncertainties (standard deviations).
             If None, uniform uncertainties of 1.0 are assumed.
-        output : {'stats', 'periodogram'}, default='stats'
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
             Type of output to return.
         normalize : bool, default=False
             Unused (accepted for API consistency).
@@ -334,10 +434,14 @@ class FPW:
             Number of top Statistics to return.
         significance_type : {'stdmean', 'madmedian'}, default='stdmean'
             Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
 
         Returns
         -------
-        list of Statistics or list of Periodogram
+        list of Statistics, list of Periodogram, or list of list of Statistics
         """
         validate_inputs(times, mags)
         ensure_float32(times, "times")
@@ -358,6 +462,19 @@ class FPW:
                     raise ValueError(
                         f"errs[{i}] and times[{i}] have different lengths: {len(e)} vs {len(t)}"
                     )
+
+        if output == "peaks":
+            idx, val = calc_fpw_peaks_batched(
+                times,
+                mags,
+                errs,
+                periods,
+                period_dts,
+                self.n_bins,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
 
         fpw_ndarr = calc_fpw_batched(
             times,
@@ -384,7 +501,8 @@ class FPW:
             return [Periodogram(data, [periods, period_dts], True) for data in fpw_ndarr]
         else:
             raise NotImplementedError(
-                f'Output type "{output}" is not implemented. Use "stats" or "periodogram".'
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
             )
 
 

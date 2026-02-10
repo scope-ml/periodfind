@@ -1,5 +1,7 @@
 use numpy::ndarray::{Array2, Array3};
-use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray1};
+use numpy::{
+    IntoPyArray, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray3, PyUntypedArrayMethods,
+};
 use pyo3::prelude::*;
 
 mod aov;
@@ -8,6 +10,11 @@ mod fold;
 mod fourier;
 mod fpw;
 mod ls;
+mod peaks;
+
+// ===========================================================================
+// Full-periodogram functions (existing)
+// ===========================================================================
 
 /// Compute batched Conditional Entropy periodograms.
 ///
@@ -227,13 +234,245 @@ fn calc_fourier_batched<'py>(
     Ok(output.into_pyarray(py).into())
 }
 
+// ===========================================================================
+// Peak-finding functions
+// ===========================================================================
+
+/// Find top-N peaks in pre-computed periodograms.
+///
+/// Takes a 3D array of shape (n_curves, n_periods, n_pdts) and returns two
+/// 2D arrays: peak_indices (n_curves, n_peaks) and peak_values (n_curves, n_peaks),
+/// both sorted best-first per curve.
+///
+/// Peaks are local extrema (maxima if use_max=True, minima otherwise)
+/// separated by at least `min_distance` samples in the flattened
+/// (n_periods × n_pdts) scan order.
+#[pyfunction]
+fn find_top_peaks_batched<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    n_peaks: usize,
+    min_distance: usize,
+    use_max: bool,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let shape = data.shape();
+    let n_curves = shape[0];
+    let n_periods = shape[1];
+    let n_pdts = shape[2];
+    let flat_len = n_periods * n_pdts;
+
+    let mut out_indices = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_values = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    let data_arr = data.as_array();
+
+    for curve_idx in 0..n_curves {
+        // Flatten the 2D periodogram for this curve into a contiguous slice
+        let mut flat = Vec::with_capacity(flat_len);
+        for p in 0..n_periods {
+            for d in 0..n_pdts {
+                flat.push(data_arr[[curve_idx, p, d]]);
+            }
+        }
+
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, use_max);
+
+        for i in 0..idx.len() {
+            out_indices[[curve_idx, i]] = idx[i];
+            out_values[[curve_idx, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_indices.into_pyarray(py).into(),
+        out_values.into_pyarray(py).into(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Fused: compute periodogram + find peaks without materialising full output.
+//
+// Memory: O(n_periods × n_pdts) per curve (temporary) instead of
+//         O(n_curves × n_periods × n_pdts) for the full 3D array.
+// ---------------------------------------------------------------------------
+
+/// Fused CE + peak finding.  Returns (peak_indices, peak_values) each of
+/// shape (n_curves, n_peaks).
+#[pyfunction]
+fn calc_ce_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_phase: usize,
+    num_mag: usize,
+    phase_overlap: usize,
+    mag_overlap: usize,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let flat = ce::calc_ce(
+            ts,
+            ms,
+            periods_s,
+            period_dts_s,
+            num_phase,
+            num_mag,
+            phase_overlap,
+            mag_overlap,
+        );
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, false);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+/// Fused AOV + peak finding.
+#[pyfunction]
+fn calc_aov_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+    num_overlap: usize,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let flat = aov::calc_aov(ts, ms, periods_s, period_dts_s, num_bins, num_overlap);
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+/// Fused LS + peak finding.
+#[pyfunction]
+fn calc_ls_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let flat = ls::calc_ls(ts, ms, periods_s, period_dts_s);
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+/// Fused FPW + peak finding.
+#[pyfunction]
+fn calc_fpw_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let es = errs_list[ci].as_slice()?;
+        let flat = fpw::calc_fpw(ts, ms, es, periods_s, period_dts_s, num_bins);
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+// ===========================================================================
+// Module registration
+// ===========================================================================
+
 /// Native CPU implementations of period-finding algorithms.
 #[pymodule]
 fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Full periodogram
     m.add_function(wrap_pyfunction!(calc_ce_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_aov_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_ls_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fpw_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fourier_batched, m)?)?;
+    // Peak finding
+    m.add_function(wrap_pyfunction!(find_top_peaks_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_ce_peaks_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_aov_peaks_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_ls_peaks_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_fpw_peaks_batched, m)?)?;
     Ok(())
 }
