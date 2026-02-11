@@ -298,7 +298,7 @@ class Statistics:
             Periodogram data to find statistics for
 
         mean : float, default=None
-        Periodogram test statistic mean. Calculated if not provided.
+            Periodogram test statistic mean. Calculated if not provided.
 
         std : float, default=None
             Periodogram test statistic std. Calculated if not provided.
