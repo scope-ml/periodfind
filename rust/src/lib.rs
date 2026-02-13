@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 
 mod aov;
 mod basicstats;
+mod bls;
 mod ce;
 mod dmdt;
 mod fold;
@@ -180,6 +181,55 @@ fn calc_fpw_batched<'py>(
             periods_slice,
             period_dts_slice,
             num_bins,
+        );
+
+        for period_idx in 0..n_periods {
+            for pdt_idx in 0..n_pdts {
+                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
+            }
+        }
+    }
+
+    Ok(output.into_pyarray(py).into())
+}
+
+/// Compute batched Box Least Squares periodograms.
+///
+/// Returns a 3D numpy array of shape (n_curves, n_periods, n_pdts).
+#[pyfunction]
+fn calc_bls_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+    qmin: f32,
+    qmax: f32,
+) -> PyResult<Py<PyArray3<f32>>> {
+    let periods_slice = periods.as_slice()?;
+    let period_dts_slice = period_dts.as_slice()?;
+    let n_curves = times_list.len();
+    let n_periods = periods_slice.len();
+    let n_pdts = period_dts_slice.len();
+
+    let mut output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+
+    for curve_idx in 0..n_curves {
+        let times_slice = times_list[curve_idx].as_slice()?;
+        let mags_slice = mags_list[curve_idx].as_slice()?;
+        let errs_slice = errs_list[curve_idx].as_slice()?;
+
+        let result = bls::calc_bls(
+            times_slice,
+            mags_slice,
+            errs_slice,
+            periods_slice,
+            period_dts_slice,
+            num_bins,
+            qmin,
+            qmax,
         );
 
         for period_idx in 0..n_periods {
@@ -459,6 +509,46 @@ fn calc_fpw_peaks_batched<'py>(
     ))
 }
 
+/// Fused BLS + peak finding.
+#[pyfunction]
+fn calc_bls_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+    qmin: f32,
+    qmax: f32,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let es = errs_list[ci].as_slice()?;
+        let flat = bls::calc_bls(ts, ms, es, periods_s, period_dts_s, num_bins, qmin, qmax);
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
 // ===========================================================================
 // High-cadence removal
 // ===========================================================================
@@ -617,6 +707,7 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_aov_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_ls_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fpw_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_bls_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fourier_batched, m)?)?;
     // Peak finding
     m.add_function(wrap_pyfunction!(find_top_peaks_batched, m)?)?;
@@ -624,6 +715,7 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_aov_peaks_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_ls_peaks_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fpw_peaks_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_bls_peaks_batched, m)?)?;
     // Feature extraction
     m.add_function(wrap_pyfunction!(remove_high_cadence_batched, m)?)?;
     m.add_function(wrap_pyfunction!(compute_dmdt_batched, m)?)?;

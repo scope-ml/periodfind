@@ -21,6 +21,13 @@ from periodfind_cpu import (
     remove_high_cadence_batched,
 )
 
+# BLS support is optional (requires periodfind_cpu built with BLS feature)
+try:
+    from periodfind_cpu import calc_bls_batched, calc_bls_peaks_batched
+    _HAS_BLS = True
+except ImportError:
+    _HAS_BLS = False
+
 from periodfind import Periodogram, Statistics
 from periodfind._utils import ensure_float32, prepare_magnitudes, validate_inputs
 
@@ -502,6 +509,154 @@ class FPW:
             return all_stats
         elif output == "periodogram":
             return [Periodogram(data, [periods, period_dts], True) for data in fpw_ndarr]
+        else:
+            raise NotImplementedError(
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
+            )
+
+
+class BoxLeastSquares:
+    """Box Least Squares (BLS) transit-detection light curve analysis (CPU backend).
+
+    Searches for periodic box-shaped (flat-bottom) dips in time-series data,
+    as described by Kovács, Zucker & Mazeh (2002).
+
+    Parameters
+    ----------
+    n_bins : int, default=50
+        The number of phase bins.
+    qmin : float, default=0.01
+        Minimum transit duration as a fraction of the period.
+    qmax : float, default=0.5
+        Maximum transit duration as a fraction of the period.
+    """
+
+    def __init__(self, n_bins=50, qmin=0.01, qmax=0.5):
+        if not _HAS_BLS:
+            raise ImportError(
+                "BLS support requires periodfind_cpu compiled with BLS. "
+                "Rebuild periodfind_cpu from source to enable BLS."
+            )
+        self.n_bins = n_bins
+        self.qmin = qmin
+        self.qmax = qmax
+
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        errs=None,
+        output="stats",
+        normalize=False,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
+    ):
+        """Runs BLS calculations on a list of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray
+            List of light curve times.
+        mags : list of ndarray
+            List of light curve magnitudes.
+        periods : ndarray
+            Array of trial periods (float32).
+        period_dts : ndarray
+            Array of trial period time derivatives (float32).
+        errs : list of ndarray or None, default=None
+            List of per-point uncertainties (standard deviations).
+            If None, uniform uncertainties of 1.0 are assumed.
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
+            Type of output to return.
+        normalize : bool, default=False
+            Unused (accepted for API consistency).
+        center : bool, default=False
+            Unused (accepted for API consistency).
+        n_stats : int, default=1
+            Number of top Statistics to return.
+        significance_type : {'stdmean', 'madmedian'}, default='stdmean'
+            Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
+
+        Returns
+        -------
+        list of Statistics, list of Periodogram, or list of list of Statistics
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+
+        # Handle uncertainties
+        if errs is None:
+            errs = [np.ones(len(t), dtype=np.float32) for t in times]
+        else:
+            ensure_float32(errs, "errs")
+            if len(errs) != len(times):
+                raise ValueError(
+                    f"errs must have the same number of arrays as times, "
+                    f"got {len(errs)} and {len(times)}"
+                )
+            for i, (e, t) in enumerate(zip(errs, times)):
+                if len(e) != len(t):
+                    raise ValueError(
+                        f"errs[{i}] and times[{i}] have different lengths: {len(e)} vs {len(t)}"
+                    )
+
+        if not _HAS_BLS:
+            raise ImportError(
+                "BLS support requires periodfind_cpu compiled with BLS feature. "
+                "Rebuild periodfind_cpu from source to enable BLS."
+            )
+
+        if output == "peaks":
+            idx, val = calc_bls_peaks_batched(
+                times,
+                mags,
+                errs,
+                periods,
+                period_dts,
+                self.n_bins,
+                self.qmin,
+                self.qmax,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
+
+        bls_ndarr = calc_bls_batched(
+            times,
+            mags,
+            errs,
+            periods,
+            period_dts,
+            self.n_bins,
+            self.qmin,
+            self.qmax,
+        )
+
+        if output == "stats":
+            all_stats = []
+            for i in range(len(times)):
+                stats = Statistics.statistics_from_data(
+                    bls_ndarr[i],
+                    [periods, period_dts],
+                    True,
+                    n=n_stats,
+                    significance_type=significance_type,
+                )
+                all_stats.append(stats)
+            return all_stats
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in bls_ndarr]
         else:
             raise NotImplementedError(
                 f'Output type "{output}" is not implemented. '

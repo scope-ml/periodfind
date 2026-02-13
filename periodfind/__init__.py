@@ -134,6 +134,20 @@ def FPW(**kwargs):
     return _Cls(**kwargs)
 
 
+def BoxLeastSquares(**kwargs):
+    """Create a Box Least Squares algorithm on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        from periodfind.gpu import BoxLeastSquares as _Cls
+    else:
+        from periodfind.cpu import BoxLeastSquares as _Cls
+    return _Cls(**kwargs)
+
+
 def FourierDecomposition(**kwargs):
     """Create a Fourier decomposition feature extractor.
 

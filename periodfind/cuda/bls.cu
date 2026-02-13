@@ -1,0 +1,323 @@
+// Box Least Squares (BLS) transit-detection algorithm — CUDA implementation.
+//
+// Searches for periodic box-shaped (flat-bottom) dips in time-series data.
+// Kovács, Zucker & Mazeh (2002).
+
+#include "bls.h"
+
+#include <algorithm>
+
+#include "cuda_runtime.h"
+#include "math.h"
+
+#include "errchk.cuh"
+
+//
+// Simple BLS Function Definitions
+//
+
+BLS::BLS(size_t n_bins, float qmin_val, float qmax_val) {
+    num_bins = n_bins;
+    bin_size = 1.0f / static_cast<float>(n_bins);
+    qmin = qmin_val;
+    qmax = qmax_val;
+}
+
+__host__ __device__ size_t BLS::NumBins() const {
+    return num_bins;
+}
+
+__host__ __device__ size_t BLS::PhaseBin(float phase_val) const {
+    return static_cast<size_t>(phase_val / bin_size);
+}
+
+__host__ __device__ float BLS::Qmin() const {
+    return qmin;
+}
+
+__host__ __device__ float BLS::Qmax() const {
+    return qmax;
+}
+
+//
+// CUDA Kernels
+//
+
+// Tile size for shared-memory light curve tiling
+#define BLS_TILE_SIZE 256
+
+// Maximum number of phase bins (for register-based accumulators)
+#define BLS_MAX_BINS 256
+
+__global__ void BLSKernel(const float* __restrict__ times,
+                          const float* __restrict__ ivar,
+                          const float* __restrict__ ivar_yw,
+                          const size_t length,
+                          const float* __restrict__ periods,
+                          const float* __restrict__ period_dts,
+                          const size_t num_periods,
+                          const size_t num_period_dts,
+                          const BLS params,
+                          float* __restrict__ bls_out) {
+    // Shared memory for tiling light curve data
+    extern __shared__ float sh_data[];
+    float* sh_times = &sh_data[0];
+    float* sh_ivar = &sh_data[BLS_TILE_SIZE];
+    float* sh_ivar_yw = &sh_data[2 * BLS_TILE_SIZE];
+
+    // One block per (period, period_dt) pair
+    const size_t period_idx = blockIdx.x;
+    const size_t pdt_idx = blockIdx.y;
+
+    if (period_idx >= num_periods || pdt_idx >= num_period_dts) {
+        return;
+    }
+
+    const float period = periods[period_idx];
+    const float period_dt = period_dts[pdt_idx];
+    const float pdt_corr = (period_dt / period) / 2;
+
+    const size_t n_bins = params.NumBins();
+
+    float i_part;
+
+    // Thread-local bin accumulators (thread 0 only)
+    float w_bin[BLS_MAX_BINS];
+    float yw_bin[BLS_MAX_BINS];
+
+    if (threadIdx.x == 0) {
+        for (size_t k = 0; k < n_bins && k < BLS_MAX_BINS; k++) {
+            w_bin[k] = 0.0f;
+            yw_bin[k] = 0.0f;
+        }
+    }
+
+    // Process the light curve in tiles
+    for (size_t tile_start = 0; tile_start < length;
+         tile_start += BLS_TILE_SIZE) {
+        size_t tile_end = tile_start + BLS_TILE_SIZE;
+        if (tile_end > length)
+            tile_end = length;
+        size_t tile_len = tile_end - tile_start;
+
+        // Cooperatively load tile into shared memory
+        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            sh_times[i] = times[tile_start + i];
+            sh_ivar[i] = ivar[tile_start + i];
+            sh_ivar_yw[i] = ivar_yw[tile_start + i];
+        }
+        __syncthreads();
+
+        // Thread 0 accumulates over the tile
+        if (threadIdx.x == 0) {
+            for (size_t i = 0; i < tile_len; i++) {
+                float t = sh_times[i];
+                float t_corr = t - pdt_corr * t * t;
+                float folded = fabsf(modff(t_corr / period, &i_part));
+
+                size_t bin = params.PhaseBin(folded);
+                if (bin >= n_bins)
+                    bin = n_bins - 1;
+
+                w_bin[bin] += sh_ivar[i];
+                yw_bin[bin] += sh_ivar_yw[i];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Thread 0 computes the BLS statistic
+    if (threadIdx.x != 0)
+        return;
+
+    // Compute prefix sums
+    float w_prefix[BLS_MAX_BINS + 1];
+    float yw_prefix[BLS_MAX_BINS + 1];
+    w_prefix[0] = 0.0f;
+    yw_prefix[0] = 0.0f;
+    for (size_t k = 0; k < n_bins; k++) {
+        w_prefix[k + 1] = w_prefix[k] + w_bin[k];
+        yw_prefix[k + 1] = yw_prefix[k] + yw_bin[k];
+    }
+    float w_total = w_prefix[n_bins];
+
+    if (w_total <= 0.0f) {
+        bls_out[period_idx * num_period_dts + pdt_idx] = 0.0f;
+        return;
+    }
+
+    // Transit duration range in bins
+    size_t nb_min = max((size_t)1, (size_t)(params.Qmin() * n_bins));
+    size_t nb_max = min(n_bins - 1, (size_t)ceilf(params.Qmax() * n_bins));
+
+    float best_bls = 0.0f;
+
+    for (size_t nb = nb_min; nb <= nb_max; nb++) {
+        for (size_t phi = 0; phi < n_bins; phi++) {
+            size_t end = phi + nb;
+            float r, s;
+            if (end <= n_bins) {
+                r = w_prefix[end] - w_prefix[phi];
+                s = yw_prefix[end] - yw_prefix[phi];
+            } else {
+                size_t wrap = end - n_bins;
+                r = (w_prefix[n_bins] - w_prefix[phi]) + w_prefix[wrap];
+                s = (yw_prefix[n_bins] - yw_prefix[phi]) + yw_prefix[wrap];
+            }
+
+            float r_frac = r / w_total;
+            if (r_frac > 0.0f && r_frac < 1.0f) {
+                float bls = (s * s) / (r * (w_total - r));
+                if (bls > best_bls) {
+                    best_bls = bls;
+                }
+            }
+        }
+    }
+
+    bls_out[period_idx * num_period_dts + pdt_idx] = best_bls;
+}
+
+//
+// Wrapper Functions
+//
+
+void BLS::CalcBLSBatched(const std::vector<float*>& times,
+                         const std::vector<float*>& mags,
+                         const std::vector<float*>& errs,
+                         const std::vector<size_t>& lengths,
+                         const float* periods,
+                         const float* period_dts,
+                         const size_t num_periods,
+                         const size_t num_p_dts,
+                         float* bls_out) const {
+    size_t per_points = num_periods * num_p_dts;
+    size_t per_out_size = per_points * sizeof(float);
+
+    // Copy trial information over
+    float* dev_periods;
+    float* dev_period_dts;
+    gpuErrchk(cudaMalloc(&dev_periods, num_periods * sizeof(float)));
+    gpuErrchk(cudaMalloc(&dev_period_dts, num_p_dts * sizeof(float)));
+    gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
+                         cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
+                         cudaMemcpyHostToDevice));
+
+    // Kernel launch information: one block per (period, period_dt) pair
+    const size_t num_threads = 256;
+    const size_t shared_bytes = 3 * BLS_TILE_SIZE * sizeof(float);
+    const dim3 grid_dim = dim3(num_periods, num_p_dts);
+
+    // Buffer size (large enough for longest light curve)
+    auto max_length = std::max_element(lengths.begin(), lengths.end());
+    const size_t buffer_length = *max_length;
+    const size_t buffer_bytes = sizeof(float) * buffer_length;
+
+    // Create 2 CUDA streams for double-buffered async transfers
+    const int NUM_STREAMS = 2;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaStreamCreate(&streams[s]));
+    }
+
+    // Allocate double-buffered device memory
+    float* dev_times_buf[NUM_STREAMS];
+    float* dev_ivar_buf[NUM_STREAMS];
+    float* dev_ivar_yw_buf[NUM_STREAMS];
+    float* dev_bls_buf[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaMalloc(&dev_times_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_ivar_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_ivar_yw_buf[s], buffer_bytes));
+        gpuErrchk(cudaMalloc(&dev_bls_buf[s], per_out_size));
+    }
+
+    // Host-side buffers for precomputed ivar and ivar_yw
+    float* h_ivar = (float*)malloc(buffer_bytes);
+    float* h_ivar_yw = (float*)malloc(buffer_bytes);
+
+    for (size_t i = 0; i < lengths.size(); i++) {
+        int s = i % NUM_STREAMS;
+        cudaStream_t stream = streams[s];
+
+        // Compute weighted mean for centering
+        float total_w = 0.0f;
+        float total_wy = 0.0f;
+        for (size_t j = 0; j < lengths[i]; j++) {
+            float e = errs[i][j];
+            float w = 1.0f / (e * e);
+            total_w += w;
+            total_wy += w * mags[i][j];
+        }
+        float mean_y = (total_w > 0.0f) ? (total_wy / total_w) : 0.0f;
+
+        // Precompute inverse variance and weighted centered data on CPU
+        for (size_t j = 0; j < lengths[i]; j++) {
+            float e = errs[i][j];
+            h_ivar[j] = 1.0f / (e * e);
+            h_ivar_yw[j] = h_ivar[j] * (mags[i][j] - mean_y);
+        }
+
+        // Copy light curve data into device buffers (async)
+        const size_t curve_bytes = lengths[i] * sizeof(float);
+        gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
+                                  cudaMemcpyHostToDevice, stream));
+        gpuErrchk(cudaMemcpyAsync(dev_ivar_buf[s], h_ivar, curve_bytes,
+                                  cudaMemcpyHostToDevice, stream));
+        gpuErrchk(cudaMemcpyAsync(dev_ivar_yw_buf[s], h_ivar_yw, curve_bytes,
+                                  cudaMemcpyHostToDevice, stream));
+
+        // Zero output
+        gpuErrchk(cudaMemsetAsync(dev_bls_buf[s], 0, per_out_size, stream));
+
+        BLSKernel<<<grid_dim, num_threads, shared_bytes, stream>>>(
+            dev_times_buf[s], dev_ivar_buf[s], dev_ivar_yw_buf[s],
+            lengths[i], dev_periods, dev_period_dts, num_periods, num_p_dts,
+            *this, dev_bls_buf[s]);
+
+        // Copy result back to host (async)
+        gpuErrchk(cudaMemcpyAsync(&bls_out[i * per_points], dev_bls_buf[s],
+                                  per_out_size, cudaMemcpyDeviceToHost,
+                                  stream));
+    }
+
+    // Synchronize and clean up streams
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaStreamSynchronize(streams[s]));
+    }
+
+    // Free all GPU memory
+    gpuErrchk(cudaFree(dev_periods));
+    gpuErrchk(cudaFree(dev_period_dts));
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        gpuErrchk(cudaFree(dev_times_buf[s]));
+        gpuErrchk(cudaFree(dev_ivar_buf[s]));
+        gpuErrchk(cudaFree(dev_ivar_yw_buf[s]));
+        gpuErrchk(cudaFree(dev_bls_buf[s]));
+        gpuErrchk(cudaStreamDestroy(streams[s]));
+    }
+
+    free(h_ivar);
+    free(h_ivar_yw);
+}
+
+float* BLS::CalcBLSBatched(const std::vector<float*>& times,
+                           const std::vector<float*>& mags,
+                           const std::vector<float*>& errs,
+                           const std::vector<size_t>& lengths,
+                           const float* periods,
+                           const float* period_dts,
+                           const size_t num_periods,
+                           const size_t num_p_dts) const {
+    size_t per_points = num_periods * num_p_dts;
+    size_t per_out_size = per_points * sizeof(float);
+    size_t per_size_total = per_out_size * lengths.size();
+
+    float* bls_out = (float*)malloc(per_size_total);
+
+    CalcBLSBatched(times, mags, errs, lengths, periods, period_dts, num_periods,
+                   num_p_dts, bls_out);
+
+    return bls_out;
+}

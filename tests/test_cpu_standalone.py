@@ -12,7 +12,14 @@ import numpy as np
 import pytest
 
 from periodfind import Periodogram, Statistics
-from periodfind.cpu import AOV, FPW, ConditionalEntropy, LombScargle, find_top_peaks_batched
+from periodfind.cpu import (
+    AOV,
+    FPW,
+    BoxLeastSquares,
+    ConditionalEntropy,
+    LombScargle,
+    find_top_peaks_batched,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers (same as test_periodfind.py)
@@ -544,6 +551,205 @@ class TestCPUFPW:
         period_dts = np.array([0.0], dtype=np.float32)
         result = fpw.calc([t], [m], periods, period_dts, output="stats")
         assert isinstance(result[0], Statistics)
+
+
+# ---------------------------------------------------------------------------
+# Box Least Squares tests
+# ---------------------------------------------------------------------------
+
+
+class TestCPUBoxLeastSquares:
+    def test_basic_stats_output(self):
+        """BLS should return Statistics objects."""
+        t, m = make_eclipsing_binary(period=2.5)
+        periods = make_trial_periods(2.5)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.5)
+        result = bls.calc([t], [m], periods, period_dts, output="stats")
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], Statistics)
+        assert result[0].significance > 0
+
+    def test_detects_eclipsing_binary(self):
+        """BLS should find the correct period for an eclipsing binary."""
+        true_period = 2.5
+        t, m = make_eclipsing_binary(
+            period=true_period, n_points=800, eclipse_depth=0.5, noise_std=0.02, t_span=200.0
+        )
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.3)
+        result = bls.calc([t], [m], periods, period_dts, output="stats")
+
+        detected = result[0].params[0]
+        assert period_matches(detected, true_period), (
+            f"Expected ~{true_period}, got {detected}"
+        )
+
+    def test_detects_known_period_sinusoidal(self):
+        """BLS should find the correct period for a sinusoidal signal."""
+        true_period = 5.0
+        t, m = make_sinusoidal_lightcurve(
+            period=true_period, n_points=800, noise_std=0.02, t_span=200.0
+        )
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.5)
+        result = bls.calc([t], [m], periods, period_dts, output="stats")
+
+        detected = result[0].params[0]
+        assert period_matches(detected, true_period), (
+            f"Expected ~{true_period}, got {detected}"
+        )
+
+    def test_with_uncertainties(self):
+        """BLS with explicit uncertainties should detect the period."""
+        true_period = 3.0
+        t, m = make_eclipsing_binary(
+            period=true_period, n_points=600, eclipse_depth=0.5, noise_std=0.05, t_span=150.0
+        )
+        errs = np.full(len(t), 0.05, dtype=np.float32)
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.3)
+        result = bls.calc([t], [m], periods, period_dts, errs=[errs], output="stats")
+
+        detected = result[0].params[0]
+        assert period_matches(detected, true_period), (
+            f"Expected ~{true_period}, got {detected}"
+        )
+
+    def test_without_uncertainties(self):
+        """BLS without uncertainties (uniform weights) should still work."""
+        true_period = 2.0
+        t, m = make_eclipsing_binary(
+            period=true_period, n_points=500, eclipse_depth=0.5, noise_std=0.03, t_span=100.0
+        )
+        periods = make_trial_periods(true_period, n_periods=400)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.3)
+        result = bls.calc([t], [m], periods, period_dts, output="stats")
+
+        detected = result[0].params[0]
+        assert period_matches(detected, true_period), (
+            f"Expected ~{true_period}, got {detected}"
+        )
+
+    def test_periodogram_output(self):
+        """BLS periodogram should have correct shape and use maxima."""
+        t, m = make_eclipsing_binary(period=3.0)
+        periods = np.linspace(1.0, 10.0, 100, dtype=np.float32)
+        period_dts = np.array([0.0, 0.001], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.5)
+        result = bls.calc([t], [m], periods, period_dts, output="periodogram")
+
+        pgram = result[0]
+        assert isinstance(pgram, Periodogram)
+        assert pgram.data.shape == (100, 2)
+        assert pgram.use_max is True
+
+    def test_multiple_lightcurves(self):
+        """BLS should handle batched light curves."""
+        lcs = [
+            make_eclipsing_binary(period=p, seed=i) for i, p in enumerate([2.0, 4.0, 6.0])
+        ]
+        times = [lc[0] for lc in lcs]
+        mag_list = [lc[1] for lc in lcs]
+        periods = np.linspace(1.0, 10.0, 300, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.3)
+        result = bls.calc(times, mag_list, periods, period_dts, output="stats")
+        assert len(result) == 3
+
+    def test_n_stats_multiple(self):
+        """Requesting n_stats > 1 should return a list of Statistics."""
+        t, m = make_eclipsing_binary(period=3.0)
+        periods = np.linspace(1.0, 10.0, 200, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.5)
+        result = bls.calc([t], [m], periods, period_dts, output="stats", n_stats=5)
+        assert isinstance(result[0], list)
+        assert len(result[0]) == 5
+
+    def test_mismatched_errs_raises(self):
+        """Mismatched errs list length should raise ValueError."""
+        t, m = make_eclipsing_binary(period=3.0)
+        errs = np.ones(len(t), dtype=np.float32)
+        periods = np.linspace(1.0, 10.0, 50, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares()
+        with pytest.raises(ValueError):
+            bls.calc([t, t], [m, m], periods, period_dts, errs=[errs])
+
+    def test_float64_errs_raises(self):
+        """Passing float64 errs should raise TypeError."""
+        t, m = make_eclipsing_binary(period=3.0)
+        errs = np.ones(len(t), dtype=np.float64)
+        periods = np.linspace(1.0, 10.0, 50, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares()
+        with pytest.raises(TypeError, match="expected float32"):
+            bls.calc([t], [m], periods, period_dts, errs=[errs])
+
+    def test_factory_function(self):
+        """periodfind.BoxLeastSquares() factory should produce a working object."""
+        import periodfind
+
+        bls = periodfind.BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.5, device="cpu")
+        t, m = make_eclipsing_binary(period=3.0)
+        periods = np.linspace(1.0, 10.0, 100, dtype=np.float32)
+        period_dts = np.array([0.0], dtype=np.float32)
+        result = bls.calc([t], [m], periods, period_dts, output="stats")
+        assert isinstance(result[0], Statistics)
+
+    def test_peaks_output(self):
+        """BLS peak finding should work."""
+        true_period = 2.5
+        t, m = make_eclipsing_binary(
+            period=true_period, n_points=800, eclipse_depth=0.5, noise_std=0.02, t_span=200.0
+        )
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.3)
+        peaks = bls.calc([t], [m], periods, period_dts, output="peaks", n_peaks=16)
+
+        assert isinstance(peaks, list)
+        assert len(peaks) == 1
+        assert isinstance(peaks[0], list)
+        assert len(peaks[0]) <= 16
+        assert isinstance(peaks[0][0], Statistics)
+
+    def test_peaks_best_matches_stats(self):
+        """The best BLS peak should match the stats output."""
+        true_period = 3.0
+        t, m = make_eclipsing_binary(
+            period=true_period, n_points=600, eclipse_depth=0.5, t_span=150.0
+        )
+        periods = make_trial_periods(true_period, n_periods=500)
+        period_dts = np.array([0.0], dtype=np.float32)
+
+        bls = BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.3)
+        stats = bls.calc([t], [m], periods, period_dts, output="stats")
+        peaks = bls.calc(
+            [t], [m], periods, period_dts, output="peaks", n_peaks=32, min_distance=1
+        )
+
+        stats_period = stats[0].params[0]
+        peaks_period = peaks[0][0].params[0]
+        assert stats_period == pytest.approx(peaks_period)
 
 
 # ---------------------------------------------------------------------------
