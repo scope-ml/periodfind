@@ -12,6 +12,7 @@ A collection of CUDA-accelerated periodicity detection algorithms, with both C++
 | Analysis of Variance | `periodfind.AOV` | `periodfind.gpu.AOV` | `periodfind.cpu.AOV` |
 | Lomb-Scargle | `periodfind.LombScargle` | `periodfind.gpu.LombScargle` | `periodfind.cpu.LombScargle` |
 | Fast Phase-folding Weighted | `periodfind.FPW` | `periodfind.gpu.FPW` | `periodfind.cpu.FPW` |
+| Box Least Squares | `periodfind.BoxLeastSquares` | `periodfind.gpu.BoxLeastSquares` | `periodfind.cpu.BoxLeastSquares` |
 
 ### Feature Extraction
 
@@ -37,6 +38,7 @@ ce  = periodfind.ConditionalEntropy(n_phase=10, n_mag=10)
 aov = periodfind.AOV(n_phase=15)
 ls  = periodfind.LombScargle()
 fpw = periodfind.FPW(n_bins=10)
+bls = periodfind.BoxLeastSquares(n_bins=50, qmin=0.01, qmax=0.5)
 fd  = periodfind.FourierDecomposition()  # CPU-only for now
 
 # Per-call override (ignores the global default)
@@ -49,6 +51,36 @@ You can still import backends directly:
 from periodfind.gpu import ConditionalEntropy  # CUDA backend
 from periodfind.cpu import ConditionalEntropy  # Rust CPU backend
 from periodfind.cpu import FourierDecomposition  # Rust CPU only
+```
+
+### Box Least Squares Usage
+
+BLS searches for periodic box-shaped (flat-bottom) transit dips in time-series data ([Kovacs, Zucker & Mazeh 2002](https://ui.adsabs.harvard.edu/abs/2002A%26A...391..369K)). It is particularly well-suited for detecting eclipsing binaries and transiting exoplanets.
+
+```python
+import numpy as np
+import periodfind
+
+bls = periodfind.BoxLeastSquares(
+    n_bins=50,     # number of phase bins
+    qmin=0.01,     # minimum transit duration (fraction of period)
+    qmax=0.5,      # maximum transit duration (fraction of period)
+)
+
+# times, mags: lists of float32 arrays (one per light curve)
+# errs: optional list of float32 uncertainty arrays
+periods = np.linspace(0.5, 10.0, 5000, dtype=np.float32)
+period_dts = np.array([0.0], dtype=np.float32)
+
+# Get best-period statistics
+stats = bls.calc(times, mags, periods, period_dts, errs=errs, output="stats")
+print(stats[0].params[0])  # detected period
+
+# Get full periodogram
+pgrams = bls.calc(times, mags, periods, period_dts, output="periodogram")
+
+# Get top-N peaks (memory-efficient for large grids)
+peaks = bls.calc(times, mags, periods, period_dts, output="peaks", n_peaks=32)
 ```
 
 ### Fourier Decomposition Usage
@@ -64,6 +96,33 @@ fd = periodfind.FourierDecomposition()
 features = fd.calc(times, mags, errs, periods)
 # features.shape == (n_curves, 14)
 ```
+
+## Throughput Benchmarks
+
+Measured on a batch of **100 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon on 2x Intel Xeon E5-2680 v4 (28 cores); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
+
+### Throughput table (points/sec)
+
+| pts/curve | Backend | CE | AOV | LS | FPW | BLS |
+|----------:|---------|---:|----:|---:|----:|----:|
+| 256 | CPU | 36K | 130K | 106K | 194K | 95K |
+| 256 | GPU | 964K | 1.0M | 475K | 517K | 81K |
+| 256 | **Speedup** | **27x** | **7.8x** | **4.5x** | **2.7x** | **0.9x** |
+| 1,024 | CPU | 52K | 165K | 146K | 202K | 125K |
+| 1,024 | GPU | 3.4M | 3.2M | 687K | 817K | 228K |
+| 1,024 | **Speedup** | **65x** | **19x** | **4.7x** | **4.0x** | **1.8x** |
+| 4,096 | CPU | 67K | 179K | 166K | 169K | 222K |
+| 4,096 | GPU | 9.3M | 3.8M | 783K | 955K | 481K |
+| 4,096 | **Speedup** | **139x** | **21x** | **4.7x** | **5.6x** | **2.2x** |
+| 16,384 | CPU | 118K | 183K | 171K | 232K | 274K |
+| 16,384 | GPU | 17.1M | 2.4M | 797K | 995K | 778K |
+| 16,384 | **Speedup** | **145x** | **13x** | **4.7x** | **4.3x** | **2.8x** |
+
+### Throughput plot (log-log scale)
+
+![Throughput benchmark](docs/throughput.png)
+
+Solid lines = GPU (CUDA), dashed lines = CPU (Rust). The GPU advantage grows with light curve length for most algorithms, with CE showing the largest speedup (up to 145x). To reproduce, run `python benchmarks/throughput_bench.py` followed by `python benchmarks/plot_throughput.py`.
 
 ## Installing
 
