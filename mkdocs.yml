@@ -43,6 +43,7 @@ nav:
     - Quick Start: getting-started/quickstart.md
   - User Guide:
     - Algorithms: user-guide/algorithms.md
+    - Benchmarks: benchmarks.md
   - API Reference:
     - Overview: api/index.md
     - Core API: api/core.md
