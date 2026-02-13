@@ -185,6 +185,19 @@ __global__ void BLSKernel(const float* __restrict__ times,
 // Wrapper Functions
 //
 
+// Per-device state for multi-GPU batched processing
+struct BLSDeviceState {
+    float* dev_periods;
+    float* dev_period_dts;
+    cudaStream_t streams[4];
+    float* dev_times_buf[4];
+    float* dev_ivar_buf[4];
+    float* dev_ivar_yw_buf[4];
+    float* dev_bls_buf[4];
+    float* h_ivar[4];
+    float* h_ivar_yw[4];
+};
+
 void BLS::CalcBLSBatched(const std::vector<float*>& times,
                          const std::vector<float*>& mags,
                          const std::vector<float*>& errs,
@@ -194,18 +207,20 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
                          const size_t num_periods,
                          const size_t num_p_dts,
                          float* bls_out) const {
+    size_t num_curves = lengths.size();
+    if (num_curves == 0) return;
+
     size_t per_points = num_periods * num_p_dts;
     size_t per_out_size = per_points * sizeof(float);
 
-    // Copy trial information over
-    float* dev_periods;
-    float* dev_period_dts;
-    gpuErrchk(cudaMalloc(&dev_periods, num_periods * sizeof(float)));
-    gpuErrchk(cudaMalloc(&dev_period_dts, num_p_dts * sizeof(float)));
-    gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
-                         cudaMemcpyHostToDevice));
+    // Determine number of GPUs
+    int num_devices = 1;
+    if (cudaGetDeviceCount(&num_devices) != cudaSuccess) {
+        num_devices = 1;
+    }
+    if (num_devices > (int)num_curves) {
+        num_devices = (int)num_curves;
+    }
 
     // Kernel launch information: one block per (period, period_dt) pair
     const size_t num_threads = 256;
@@ -213,97 +228,131 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
         (3 * BLS_TILE_SIZE + 2 * NumBins()) * sizeof(float);
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
-    // Buffer size (large enough for longest light curve)
-    auto max_length = std::max_element(lengths.begin(), lengths.end());
-    const size_t buffer_length = *max_length;
-    const size_t buffer_bytes = sizeof(float) * buffer_length;
-
-    // Create 2 CUDA streams for double-buffered async transfers
     const int NUM_STREAMS = 4;
-    cudaStream_t streams[NUM_STREAMS];
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaStreamCreate(&streams[s]));
-    }
 
-    // Allocate double-buffered device memory
-    float* dev_times_buf[NUM_STREAMS];
-    float* dev_ivar_buf[NUM_STREAMS];
-    float* dev_ivar_yw_buf[NUM_STREAMS];
-    float* dev_bls_buf[NUM_STREAMS];
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaMalloc(&dev_times_buf[s], buffer_bytes));
-        gpuErrchk(cudaMalloc(&dev_ivar_buf[s], buffer_bytes));
-        gpuErrchk(cudaMalloc(&dev_ivar_yw_buf[s], buffer_bytes));
-        gpuErrchk(cudaMalloc(&dev_bls_buf[s], per_out_size));
-    }
+    // Partition curves across devices
+    size_t base_count = num_curves / num_devices;
+    size_t remainder = num_curves % num_devices;
 
-    // Host-side buffers for precomputed ivar and ivar_yw
-    float* h_ivar = (float*)malloc(buffer_bytes);
-    float* h_ivar_yw = (float*)malloc(buffer_bytes);
+    std::vector<BLSDeviceState> dev_state(num_devices);
 
-    for (size_t i = 0; i < lengths.size(); i++) {
-        int s = i % NUM_STREAMS;
-        cudaStream_t stream = streams[s];
+    // Phase 1: Allocate and enqueue on each device
+    for (int d = 0; d < num_devices; d++) {
+        gpuErrchk(cudaSetDevice(d));
 
-        // Compute weighted mean for centering
-        float total_w = 0.0f;
-        float total_wy = 0.0f;
-        for (size_t j = 0; j < lengths[i]; j++) {
-            float e = errs[i][j];
-            float w = 1.0f / (e * e);
-            total_w += w;
-            total_wy += w * mags[i][j];
+        size_t start = d * base_count + std::min((size_t)d, remainder);
+        size_t count = base_count + ((size_t)d < remainder ? 1 : 0);
+
+        // Per-device max_length for buffer sizing
+        size_t dev_max_length = 0;
+        for (size_t j = start; j < start + count; j++) {
+            if (lengths[j] > dev_max_length) dev_max_length = lengths[j];
         }
-        float mean_y = (total_w > 0.0f) ? (total_wy / total_w) : 0.0f;
+        size_t buffer_bytes = sizeof(float) * dev_max_length;
 
-        // Precompute inverse variance and weighted centered data on CPU
-        for (size_t j = 0; j < lengths[i]; j++) {
-            float e = errs[i][j];
-            h_ivar[j] = 1.0f / (e * e);
-            h_ivar_yw[j] = h_ivar[j] * (mags[i][j] - mean_y);
+        // Copy periods to this device
+        gpuErrchk(cudaMalloc(&dev_state[d].dev_periods,
+                             num_periods * sizeof(float)));
+        gpuErrchk(cudaMalloc(&dev_state[d].dev_period_dts,
+                             num_p_dts * sizeof(float)));
+        gpuErrchk(cudaMemcpy(dev_state[d].dev_periods, periods,
+                             num_periods * sizeof(float),
+                             cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dev_state[d].dev_period_dts, period_dts,
+                             num_p_dts * sizeof(float),
+                             cudaMemcpyHostToDevice));
+
+        // Create streams and allocate per-stream buffers (device + host)
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            gpuErrchk(cudaStreamCreate(&dev_state[d].streams[s]));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_times_buf[s], buffer_bytes));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_ivar_buf[s], buffer_bytes));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_ivar_yw_buf[s], buffer_bytes));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_bls_buf[s], per_out_size));
+            dev_state[d].h_ivar[s] = (float*)malloc(buffer_bytes);
+            dev_state[d].h_ivar_yw[s] = (float*)malloc(buffer_bytes);
         }
 
-        // Copy light curve data into device buffers (async)
-        const size_t curve_bytes = lengths[i] * sizeof(float);
-        gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
-                                  cudaMemcpyHostToDevice, stream));
-        gpuErrchk(cudaMemcpyAsync(dev_ivar_buf[s], h_ivar, curve_bytes,
-                                  cudaMemcpyHostToDevice, stream));
-        gpuErrchk(cudaMemcpyAsync(dev_ivar_yw_buf[s], h_ivar_yw, curve_bytes,
-                                  cudaMemcpyHostToDevice, stream));
+        // Enqueue work for this device's curves
+        for (size_t j = 0; j < count; j++) {
+            size_t i = start + j;
+            int s = j % NUM_STREAMS;
+            cudaStream_t stream = dev_state[d].streams[s];
 
-        // Zero output
-        gpuErrchk(cudaMemsetAsync(dev_bls_buf[s], 0, per_out_size, stream));
+            // Compute weighted mean for centering
+            float total_w = 0.0f;
+            float total_wy = 0.0f;
+            for (size_t k = 0; k < lengths[i]; k++) {
+                float e = errs[i][k];
+                float w = 1.0f / (e * e);
+                total_w += w;
+                total_wy += w * mags[i][k];
+            }
+            float mean_y = (total_w > 0.0f) ? (total_wy / total_w) : 0.0f;
 
-        BLSKernel<<<grid_dim, num_threads, shared_bytes, stream>>>(
-            dev_times_buf[s], dev_ivar_buf[s], dev_ivar_yw_buf[s],
-            lengths[i], dev_periods, dev_period_dts, num_periods, num_p_dts,
-            *this, dev_bls_buf[s]);
+            // Precompute inverse variance and weighted centered data on CPU
+            float* h_iv = dev_state[d].h_ivar[s];
+            float* h_iyw = dev_state[d].h_ivar_yw[s];
+            for (size_t k = 0; k < lengths[i]; k++) {
+                float e = errs[i][k];
+                h_iv[k] = 1.0f / (e * e);
+                h_iyw[k] = h_iv[k] * (mags[i][k] - mean_y);
+            }
 
-        // Copy result back to host (async)
-        gpuErrchk(cudaMemcpyAsync(&bls_out[i * per_points], dev_bls_buf[s],
-                                  per_out_size, cudaMemcpyDeviceToHost,
-                                  stream));
+            // Copy light curve data into device buffers (async)
+            const size_t curve_bytes = lengths[i] * sizeof(float);
+            gpuErrchk(cudaMemcpyAsync(dev_state[d].dev_times_buf[s],
+                                      times[i], curve_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+            gpuErrchk(cudaMemcpyAsync(dev_state[d].dev_ivar_buf[s],
+                                      h_iv, curve_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+            gpuErrchk(cudaMemcpyAsync(dev_state[d].dev_ivar_yw_buf[s],
+                                      h_iyw, curve_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+
+            gpuErrchk(cudaMemsetAsync(dev_state[d].dev_bls_buf[s], 0,
+                                      per_out_size, stream));
+
+            BLSKernel<<<grid_dim, num_threads, shared_bytes, stream>>>(
+                dev_state[d].dev_times_buf[s],
+                dev_state[d].dev_ivar_buf[s],
+                dev_state[d].dev_ivar_yw_buf[s], lengths[i],
+                dev_state[d].dev_periods, dev_state[d].dev_period_dts,
+                num_periods, num_p_dts, *this,
+                dev_state[d].dev_bls_buf[s]);
+
+            gpuErrchk(cudaMemcpyAsync(&bls_out[i * per_points],
+                                      dev_state[d].dev_bls_buf[s],
+                                      per_out_size, cudaMemcpyDeviceToHost,
+                                      stream));
+        }
     }
 
-    // Synchronize and clean up streams
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaStreamSynchronize(streams[s]));
-    }
+    // Phase 2: Sync and free on each device
+    for (int d = 0; d < num_devices; d++) {
+        gpuErrchk(cudaSetDevice(d));
 
-    // Free all GPU memory
-    gpuErrchk(cudaFree(dev_periods));
-    gpuErrchk(cudaFree(dev_period_dts));
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaFree(dev_times_buf[s]));
-        gpuErrchk(cudaFree(dev_ivar_buf[s]));
-        gpuErrchk(cudaFree(dev_ivar_yw_buf[s]));
-        gpuErrchk(cudaFree(dev_bls_buf[s]));
-        gpuErrchk(cudaStreamDestroy(streams[s]));
-    }
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            gpuErrchk(cudaStreamSynchronize(dev_state[d].streams[s]));
+        }
 
-    free(h_ivar);
-    free(h_ivar_yw);
+        gpuErrchk(cudaFree(dev_state[d].dev_periods));
+        gpuErrchk(cudaFree(dev_state[d].dev_period_dts));
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            gpuErrchk(cudaFree(dev_state[d].dev_times_buf[s]));
+            gpuErrchk(cudaFree(dev_state[d].dev_ivar_buf[s]));
+            gpuErrchk(cudaFree(dev_state[d].dev_ivar_yw_buf[s]));
+            gpuErrchk(cudaFree(dev_state[d].dev_bls_buf[s]));
+            gpuErrchk(cudaStreamDestroy(dev_state[d].streams[s]));
+            free(dev_state[d].h_ivar[s]);
+            free(dev_state[d].h_ivar_yw[s]);
+        }
+    }
 }
 
 float* BLS::CalcBLSBatched(const std::vector<float*>& times,

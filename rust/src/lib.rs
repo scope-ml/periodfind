@@ -4,6 +4,7 @@ use numpy::{
     PyUntypedArrayMethods,
 };
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 mod aov;
 mod basicstats;
@@ -41,31 +42,45 @@ fn calc_ce_batched<'py>(
     let n_curves = times_list.len();
     let n_periods = periods_slice.len();
     let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
 
-    let mut output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
-
-    for curve_idx in 0..n_curves {
-        let times_slice = times_list[curve_idx].as_slice()?;
-        let mags_slice = mags_list[curve_idx].as_slice()?;
-
-        let result = ce::calc_ce(
-            times_slice,
-            mags_slice,
-            periods_slice,
-            period_dts_slice,
-            num_phase,
-            num_mag,
-            phase_overlap,
-            mag_overlap,
-        );
-
-        for period_idx in 0..n_periods {
-            for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
-            }
-        }
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
     }
 
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = ce::calc_ce(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    num_phase,
+                    num_mag,
+                    phase_overlap,
+                    mag_overlap,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_ce_batched");
     Ok(output.into_pyarray(py).into())
 }
 
@@ -87,29 +102,43 @@ fn calc_aov_batched<'py>(
     let n_curves = times_list.len();
     let n_periods = periods_slice.len();
     let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
 
-    let mut output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
-
-    for curve_idx in 0..n_curves {
-        let times_slice = times_list[curve_idx].as_slice()?;
-        let mags_slice = mags_list[curve_idx].as_slice()?;
-
-        let result = aov::calc_aov(
-            times_slice,
-            mags_slice,
-            periods_slice,
-            period_dts_slice,
-            num_bins,
-            num_overlap,
-        );
-
-        for period_idx in 0..n_periods {
-            for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
-            }
-        }
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
     }
 
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = aov::calc_aov(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    num_bins,
+                    num_overlap,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_aov_batched");
     Ok(output.into_pyarray(py).into())
 }
 
@@ -129,22 +158,37 @@ fn calc_ls_batched<'py>(
     let n_curves = times_list.len();
     let n_periods = periods_slice.len();
     let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
 
-    let mut output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
-
-    for curve_idx in 0..n_curves {
-        let times_slice = times_list[curve_idx].as_slice()?;
-        let mags_slice = mags_list[curve_idx].as_slice()?;
-
-        let result = ls::calc_ls(times_slice, mags_slice, periods_slice, period_dts_slice);
-
-        for period_idx in 0..n_periods {
-            for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
-            }
-        }
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
     }
 
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result =
+                    ls::calc_ls(times_vecs[ci], mags_vecs[ci], periods_slice, period_dts_slice);
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_ls_batched");
     Ok(output.into_pyarray(py).into())
 }
 
@@ -166,30 +210,47 @@ fn calc_fpw_batched<'py>(
     let n_curves = times_list.len();
     let n_periods = periods_slice.len();
     let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
 
-    let mut output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
-
-    for curve_idx in 0..n_curves {
-        let times_slice = times_list[curve_idx].as_slice()?;
-        let mags_slice = mags_list[curve_idx].as_slice()?;
-        let errs_slice = errs_list[curve_idx].as_slice()?;
-
-        let result = fpw::calc_fpw(
-            times_slice,
-            mags_slice,
-            errs_slice,
-            periods_slice,
-            period_dts_slice,
-            num_bins,
-        );
-
-        for period_idx in 0..n_periods {
-            for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
-            }
-        }
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
     }
 
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = fpw::calc_fpw(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    errs_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    num_bins,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_fpw_batched");
     Ok(output.into_pyarray(py).into())
 }
 
@@ -213,32 +274,49 @@ fn calc_bls_batched<'py>(
     let n_curves = times_list.len();
     let n_periods = periods_slice.len();
     let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
 
-    let mut output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
-
-    for curve_idx in 0..n_curves {
-        let times_slice = times_list[curve_idx].as_slice()?;
-        let mags_slice = mags_list[curve_idx].as_slice()?;
-        let errs_slice = errs_list[curve_idx].as_slice()?;
-
-        let result = bls::calc_bls(
-            times_slice,
-            mags_slice,
-            errs_slice,
-            periods_slice,
-            period_dts_slice,
-            num_bins,
-            qmin,
-            qmax,
-        );
-
-        for period_idx in 0..n_periods {
-            for pdt_idx in 0..n_pdts {
-                output[[curve_idx, period_idx, pdt_idx]] = result[period_idx * n_pdts + pdt_idx];
-            }
-        }
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
     }
 
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = bls::calc_bls(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    errs_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    num_bins,
+                    qmin,
+                    qmax,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_bls_batched");
     Ok(output.into_pyarray(py).into())
 }
 

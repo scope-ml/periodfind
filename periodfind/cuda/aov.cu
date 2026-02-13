@@ -297,6 +297,17 @@ float* AOV::CalcAOVVals(float* times,
                               num_periods, num_p_dts);
 }
 
+// Per-device state for multi-GPU batched processing
+struct AOVDeviceState {
+    float* dev_periods;
+    float* dev_period_dts;
+    cudaStream_t streams[4];
+    float* dev_times_buf[4];
+    float* dev_mags_buf[4];
+    AOVData* dev_hists_buf[4];
+    float* dev_aovs_buf[4];
+};
+
 void AOV::CalcAOVValsBatched(const std::vector<float*>& times,
                              const std::vector<float*>& mags,
                              const std::vector<size_t>& lengths,
@@ -305,23 +316,21 @@ void AOV::CalcAOVValsBatched(const std::vector<float*>& times,
                              const size_t num_periods,
                              const size_t num_p_dts,
                              float* aov_out) const {
-    // Size of one AOV out array, and total AOV output size.
-    size_t aov_out_size = num_periods * num_p_dts * sizeof(float);
-    size_t aov_size_total = aov_out_size * lengths.size();
+    size_t num_curves = lengths.size();
+    if (num_curves == 0) return;
 
-    // Copy trial information over
-    float* dev_periods;
-    float* dev_period_dts;
-    gpuErrchk(cudaMalloc(&dev_periods, num_periods * sizeof(float)));
-    gpuErrchk(cudaMalloc(&dev_period_dts, num_p_dts * sizeof(float)));
-    gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
-                         cudaMemcpyHostToDevice));
-
-    // Intermediate memory sizes
     size_t num_hists = num_periods * num_p_dts;
+    size_t aov_out_size = num_hists * sizeof(float);
     size_t hist_bytes = NumPhaseBins() * sizeof(AOVData) * num_hists;
+
+    // Determine number of GPUs
+    int num_devices = 1;
+    if (cudaGetDeviceCount(&num_devices) != cudaSuccess) {
+        num_devices = 1;
+    }
+    if (num_devices > (int)num_curves) {
+        num_devices = (int)num_curves;
+    }
 
     // Kernel launch information for the fold & bin step
     const size_t num_threads_fb = 256;
@@ -333,74 +342,108 @@ void AOV::CalcAOVValsBatched(const std::vector<float*>& times,
     const size_t num_blocks_aov = (num_hists / num_threads_aov) + 1;
     const size_t shared_bytes_aov = num_threads_aov * sizeof(float);
 
-    // Buffer size (large enough for longest light curve)
-    auto max_length = std::max_element(lengths.begin(), lengths.end());
-    const size_t buffer_length = *max_length;
-    const size_t buffer_bytes = sizeof(float) * buffer_length;
-
-    // Create 2 CUDA streams for double-buffered async transfers
     const int NUM_STREAMS = 4;
-    cudaStream_t streams[NUM_STREAMS];
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaStreamCreate(&streams[s]));
+
+    // Partition curves across devices
+    size_t base_count = num_curves / num_devices;
+    size_t remainder = num_curves % num_devices;
+
+    std::vector<AOVDeviceState> dev_state(num_devices);
+
+    // Phase 1: Allocate and enqueue on each device
+    for (int d = 0; d < num_devices; d++) {
+        gpuErrchk(cudaSetDevice(d));
+
+        size_t start = d * base_count + std::min((size_t)d, remainder);
+        size_t count = base_count + ((size_t)d < remainder ? 1 : 0);
+
+        // Per-device max_length for buffer sizing
+        size_t dev_max_length = 0;
+        for (size_t j = start; j < start + count; j++) {
+            if (lengths[j] > dev_max_length) dev_max_length = lengths[j];
+        }
+        size_t buffer_bytes = sizeof(float) * dev_max_length;
+
+        // Copy periods to this device
+        gpuErrchk(cudaMalloc(&dev_state[d].dev_periods,
+                             num_periods * sizeof(float)));
+        gpuErrchk(cudaMalloc(&dev_state[d].dev_period_dts,
+                             num_p_dts * sizeof(float)));
+        gpuErrchk(cudaMemcpy(dev_state[d].dev_periods, periods,
+                             num_periods * sizeof(float),
+                             cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dev_state[d].dev_period_dts, period_dts,
+                             num_p_dts * sizeof(float),
+                             cudaMemcpyHostToDevice));
+
+        // Create streams and allocate per-stream buffers
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            gpuErrchk(cudaStreamCreate(&dev_state[d].streams[s]));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_times_buf[s], buffer_bytes));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_mags_buf[s], buffer_bytes));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_hists_buf[s], hist_bytes));
+            gpuErrchk(
+                cudaMalloc(&dev_state[d].dev_aovs_buf[s], aov_out_size));
+        }
+
+        // Enqueue work for this device's curves
+        for (size_t j = 0; j < count; j++) {
+            size_t i = start + j;
+            int s = j % NUM_STREAMS;
+            cudaStream_t stream = dev_state[d].streams[s];
+
+            float mean_mag = ArrayMean(mags[i], lengths[i]);
+
+            const size_t curve_bytes = lengths[i] * sizeof(float);
+            gpuErrchk(cudaMemcpyAsync(dev_state[d].dev_times_buf[s],
+                                      times[i], curve_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+            gpuErrchk(cudaMemcpyAsync(dev_state[d].dev_mags_buf[s],
+                                      mags[i], curve_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+
+            gpuErrchk(cudaMemsetAsync(dev_state[d].dev_aovs_buf[s], 0,
+                                      aov_out_size, stream));
+
+            FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb,
+                            stream>>>(
+                dev_state[d].dev_times_buf[s],
+                dev_state[d].dev_mags_buf[s], lengths[i],
+                dev_state[d].dev_periods, dev_state[d].dev_period_dts,
+                *this, dev_state[d].dev_hists_buf[s]);
+
+            AOVKernel<<<num_blocks_aov, num_threads_aov, shared_bytes_aov,
+                        stream>>>(
+                dev_state[d].dev_hists_buf[s], num_hists, lengths[i],
+                mean_mag, *this, dev_state[d].dev_aovs_buf[s]);
+
+            gpuErrchk(cudaMemcpyAsync(&aov_out[i * num_hists],
+                                      dev_state[d].dev_aovs_buf[s],
+                                      aov_out_size, cudaMemcpyDeviceToHost,
+                                      stream));
+        }
     }
 
-    // Allocate double-buffered device memory
-    float* dev_times_buf[NUM_STREAMS];
-    float* dev_mags_buf[NUM_STREAMS];
-    AOVData* dev_hists_buf[NUM_STREAMS];
-    float* dev_aovs_buf[NUM_STREAMS];
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaMalloc(&dev_times_buf[s], buffer_bytes));
-        gpuErrchk(cudaMalloc(&dev_mags_buf[s], buffer_bytes));
-        gpuErrchk(cudaMalloc(&dev_hists_buf[s], hist_bytes));
-        gpuErrchk(cudaMalloc(&dev_aovs_buf[s], aov_out_size));
-    }
+    // Phase 2: Sync and free on each device
+    for (int d = 0; d < num_devices; d++) {
+        gpuErrchk(cudaSetDevice(d));
 
-    for (size_t i = 0; i < lengths.size(); i++) {
-        int s = i % NUM_STREAMS;
-        cudaStream_t stream = streams[s];
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            gpuErrchk(cudaStreamSynchronize(dev_state[d].streams[s]));
+        }
 
-        float mean_mag = ArrayMean(mags[i], lengths[i]);
-
-        // Copy light curve into device buffer (async)
-        const size_t curve_bytes = lengths[i] * sizeof(float);
-        gpuErrchk(cudaMemcpyAsync(dev_times_buf[s], times[i], curve_bytes,
-                                  cudaMemcpyHostToDevice, stream));
-        gpuErrchk(cudaMemcpyAsync(dev_mags_buf[s], mags[i], curve_bytes,
-                                  cudaMemcpyHostToDevice, stream));
-
-        // Zero AOV output
-        gpuErrchk(cudaMemsetAsync(dev_aovs_buf[s], 0, aov_out_size, stream));
-
-        FoldBinKernel<<<grid_dim_fb, num_threads_fb, shared_bytes_fb, stream>>>(
-            dev_times_buf[s], dev_mags_buf[s], lengths[i], dev_periods,
-            dev_period_dts, *this, dev_hists_buf[s]);
-
-        AOVKernel<<<num_blocks_aov, num_threads_aov, shared_bytes_aov,
-                    stream>>>(dev_hists_buf[s], num_hists, lengths[i], mean_mag,
-                              *this, dev_aovs_buf[s]);
-
-        // Copy AOV data back to host (async)
-        gpuErrchk(cudaMemcpyAsync(&aov_out[i * num_hists], dev_aovs_buf[s],
-                                  aov_out_size, cudaMemcpyDeviceToHost,
-                                  stream));
-    }
-
-    // Synchronize and clean up streams
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaStreamSynchronize(streams[s]));
-    }
-
-    // Free all of the GPU memory
-    gpuErrchk(cudaFree(dev_periods));
-    gpuErrchk(cudaFree(dev_period_dts));
-    for (int s = 0; s < NUM_STREAMS; s++) {
-        gpuErrchk(cudaFree(dev_times_buf[s]));
-        gpuErrchk(cudaFree(dev_mags_buf[s]));
-        gpuErrchk(cudaFree(dev_hists_buf[s]));
-        gpuErrchk(cudaFree(dev_aovs_buf[s]));
-        gpuErrchk(cudaStreamDestroy(streams[s]));
+        gpuErrchk(cudaFree(dev_state[d].dev_periods));
+        gpuErrchk(cudaFree(dev_state[d].dev_period_dts));
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            gpuErrchk(cudaFree(dev_state[d].dev_times_buf[s]));
+            gpuErrchk(cudaFree(dev_state[d].dev_mags_buf[s]));
+            gpuErrchk(cudaFree(dev_state[d].dev_hists_buf[s]));
+            gpuErrchk(cudaFree(dev_state[d].dev_aovs_buf[s]));
+            gpuErrchk(cudaStreamDestroy(dev_state[d].streams[s]));
+        }
     }
 }
 

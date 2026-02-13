@@ -17,7 +17,12 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 N_POINTS = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-N_CURVES = 100  # batch size
+N_CURVES = 100  # batch size for point-scaling sweep
+
+# Curve-count scaling parameters
+CURVE_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+FIXED_N_POINTS = 1024  # fixed point count for curve-scaling sweep
+
 N_PERIODS = 1000
 PERIOD_MIN, PERIOD_MAX = 0.5, 10.0
 N_WARMUP = 1
@@ -100,8 +105,8 @@ def bench_algo(algo, times, mags, errs, periods, period_dts, name):
 # Main
 # ---------------------------------------------------------------------------
 
-def run_backend(backend_name, backend_mod):
-    """Run all algorithms on one backend, return list of result dicts."""
+def run_point_scaling(backend_name, backend_mod):
+    """Sweep over point counts at fixed curve count. Return list of result dicts."""
     periods, period_dts = make_periods()
     results = []
 
@@ -123,6 +128,7 @@ def run_backend(backend_name, backend_mod):
             total_points = N_CURVES * n_pts
             throughput = total_points / secs  # points/sec
             row = {
+                "sweep": "points",
                 "backend": backend_name,
                 "algorithm": algo_name,
                 "n_points": n_pts,
@@ -138,27 +144,80 @@ def run_backend(backend_name, backend_mod):
     return results
 
 
+def run_curve_scaling(backend_name, backend_mod):
+    """Sweep over curve counts at fixed point count. Return list of result dicts."""
+    periods, period_dts = make_periods()
+    results = []
+
+    for algo_name in ALGO_CONFIGS:
+        try:
+            algo = create_algo(algo_name, backend_mod)
+        except (ImportError, AttributeError) as e:
+            print(f"  [SKIP] {algo_name} on {backend_name}: {e}", file=sys.stderr)
+            continue
+
+        for n_curves in CURVE_COUNTS:
+            times, mags, errs = make_lightcurves(n_curves, FIXED_N_POINTS)
+            try:
+                secs = bench_algo(algo, times, mags, errs, periods, period_dts, algo_name)
+            except Exception as e:
+                print(f"  [ERR] {algo_name}/{backend_name} curves={n_curves}: {e}",
+                      file=sys.stderr)
+                continue
+
+            total_points = n_curves * FIXED_N_POINTS
+            throughput = total_points / secs  # points/sec
+            row = {
+                "sweep": "curves",
+                "backend": backend_name,
+                "algorithm": algo_name,
+                "n_points": FIXED_N_POINTS,
+                "n_curves": n_curves,
+                "n_periods": N_PERIODS,
+                "wall_sec": round(secs, 4),
+                "throughput_pts_per_sec": round(throughput),
+            }
+            results.append(row)
+            print(f"  {algo_name:4s} | {backend_name:4s} | curves={n_curves:4d} | "
+                  f"{secs:8.4f}s | {throughput:12,.0f} pts/s")
+
+    return results
+
+
 def main():
     out_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(out_dir, "throughput_results.csv")
 
     all_results = []
 
-    # CPU backend
-    print("=== CPU (Rust) backend ===")
+    backends = []
     try:
         from periodfind import cpu as cpu_mod
-        all_results.extend(run_backend("CPU", cpu_mod))
+        backends.append(("CPU", cpu_mod))
     except ImportError as e:
         print(f"CPU backend not available: {e}", file=sys.stderr)
-
-    # GPU backend
-    print("\n=== GPU (CUDA) backend ===")
     try:
         from periodfind import gpu as gpu_mod
-        all_results.extend(run_backend("GPU", gpu_mod))
+        backends.append(("GPU", gpu_mod))
     except ImportError as e:
         print(f"GPU backend not available: {e}", file=sys.stderr)
+
+    # Sweep 1: vary point count at fixed curve count
+    print("=" * 60)
+    print(f"Point-count scaling  (n_curves={N_CURVES})")
+    print("=" * 60)
+    for name, mod in backends:
+        print(f"\n--- {name} backend ---")
+        all_results.extend(run_point_scaling(name, mod))
+
+    # Sweep 2: vary curve count at fixed point count
+    print()
+    print("=" * 60)
+    print(f"Curve-count scaling  (n_points={FIXED_N_POINTS})")
+    print("=" * 60)
+    for name, mod in backends:
+        print(f"\n--- {name} backend ---")
+        all_results.extend(run_curve_scaling(name, mod))
 
     # Write CSV
     if all_results:

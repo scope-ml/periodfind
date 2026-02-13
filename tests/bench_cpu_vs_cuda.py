@@ -17,6 +17,7 @@ HAS_GPU = False
 try:
     from periodfind.gpu import AOV as CudaAOV
     from periodfind.gpu import FPW as CudaFPW
+    from periodfind.gpu import BoxLeastSquares as CudaBLS
     from periodfind.gpu import ConditionalEntropy as CudaCE
     from periodfind.gpu import LombScargle as CudaLS
 
@@ -26,18 +27,11 @@ try:
 except (ImportError, FileNotFoundError, subprocess.TimeoutExpired):
     pass
 
-from periodfind.cpu import (
-    AOV as CpuAOV,
-)
-from periodfind.cpu import (
-    FPW as CpuFPW,
-)
-from periodfind.cpu import (
-    ConditionalEntropy as CpuCE,
-)
-from periodfind.cpu import (
-    LombScargle as CpuLS,
-)
+from periodfind.cpu import AOV as CpuAOV
+from periodfind.cpu import BoxLeastSquares as CpuBLS
+from periodfind.cpu import ConditionalEntropy as CpuCE
+from periodfind.cpu import FPW as CpuFPW
+from periodfind.cpu import LombScargle as CpuLS
 
 
 def make_lightcurve(n_points=500, period=5.0, seed=42):
@@ -64,16 +58,20 @@ def bench(fn, warmup=1, repeats=3):
 
 
 WORKLOADS = [
-    ("Small  (1×200×1)", 1, 200, 1),
-    ("Medium (1×2000×3)", 1, 2000, 3),
-    ("Large  (10×5000×1)", 10, 5000, 1),
+    ("Small   (1×200×1)",   1,   200, 1),
+    ("Medium  (1×2000×3)",  1,  2000, 3),
+    ("Large   (10×5000×1)", 10, 5000, 1),
+    ("XL      (50×2000×1)", 50, 2000, 1),
+    ("XXL    (100×2000×1)", 100, 2000, 1),
+    ("Batch  (500×1000×1)", 500, 1000, 1),
 ]
 
 ALGORITHMS = [
-    ("CE", CpuCE, (CudaCE if HAS_GPU else None), {"n_phase": 10, "n_mag": 10}, False),
+    ("CE",  CpuCE,  (CudaCE  if HAS_GPU else None), {"n_phase": 10, "n_mag": 10}, False),
     ("AOV", CpuAOV, (CudaAOV if HAS_GPU else None), {"n_phase": 10}, False),
-    ("LS", CpuLS, (CudaLS if HAS_GPU else None), {}, False),
+    ("LS",  CpuLS,  (CudaLS  if HAS_GPU else None), {}, False),
     ("FPW", CpuFPW, (CudaFPW if HAS_GPU else None), {"n_bins": 10}, True),
+    ("BLS", CpuBLS, (CudaBLS if HAS_GPU else None), {"n_bins": 50, "qmin": 0.01, "qmax": 0.5}, True),
 ]
 
 
