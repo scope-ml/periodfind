@@ -168,7 +168,7 @@ class TestStatistics:
         # use_max=True => should find 6.0 at (1, 2)
         s = Statistics.statistics_from_data(data, params, use_max=True, n=1)
         assert s.value == pytest.approx(6.0)
-        assert s.params == [20.0, 0.2]
+        assert s.params == pytest.approx([20.0, 0.2])
 
     def test_statistics_from_data_min(self):
         data = np.array([[1.0, 2.0, 3.0], [4.0, 0.5, 6.0]], dtype=np.float32)
@@ -180,7 +180,7 @@ class TestStatistics:
         # use_max=False => should find 0.5 at (1, 1)
         s = Statistics.statistics_from_data(data, params, use_max=False, n=1)
         assert s.value == pytest.approx(0.5)
-        assert s.params == [20.0, 0.1]
+        assert s.params == pytest.approx([20.0, 0.1])
 
     def test_statistics_from_data_multiple(self):
         data = np.array([5.0, 1.0, 9.0, 3.0, 7.0], dtype=np.float32)
@@ -246,7 +246,7 @@ class TestPeriodogram:
         p = Periodogram(data, params, use_max=True)
         best = p.best_params(n=1)
         assert best.value == pytest.approx(5.0)
-        assert best.params == [0.1, 0.01]
+        assert best.params == pytest.approx([0.1, 0.01])
 
     def test_best_params_min(self):
         data = np.array([[1.0, 5.0], [3.0, 2.0]], dtype=np.float32)
@@ -254,7 +254,7 @@ class TestPeriodogram:
         p = Periodogram(data, params, use_max=False)
         best = p.best_params(n=1)
         assert best.value == pytest.approx(1.0)
-        assert best.params == [0.1, 0.0]
+        assert best.params == pytest.approx([0.1, 0.0])
 
     def test_best_params_multiple(self):
         data = np.array([1.0, 5.0, 3.0, 9.0, 2.0], dtype=np.float32)
