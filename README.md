@@ -99,7 +99,7 @@ features = fd.calc(times, mags, errs, periods)
 
 ## Throughput Benchmarks
 
-Measured on a batch of **100 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon on 2x Intel Xeon E5-2680 v4 (28 cores); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
+Measured on a batch of **100 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon on 2x Intel Xeon E5-2680 v4 (28 cores); GPU = single NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
 
 ### Throughput table (points/sec)
 

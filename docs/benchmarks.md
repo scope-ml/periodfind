@@ -6,7 +6,7 @@ All benchmarks use synthetic sinusoidal light curves with Gaussian noise
 (amplitude 0.1, period 2.5, observation window 0–100).
 
 - **CPU**: Rust/Rayon on 2x Intel Xeon E5-2680 v4 (28 cores total)
-- **GPU**: NVIDIA Tesla P100 (12 GB)
+- **GPU**: single NVIDIA Tesla P100 (12 GB)
 - **Trial periods**: 1,000 linearly spaced between 0.5 and 10.0 (single `period_dt`)
 - **Timing**: median of 3 runs after 1 warmup iteration
 - **Metric**: throughput in total points processed per second (`n_curves * n_points / wall_sec`)
@@ -88,6 +88,10 @@ BLS GPU throughput is lower overall due to the scan over transit-duration
 fractions inside each period bin, which serializes more work per thread.
 
 ## Multi-Device Scaling
+
+All benchmark numbers above were collected on a **single GPU**. The library
+also supports multi-device configurations described below, but those were not
+used in these measurements.
 
 ### CUDA multi-GPU
 
