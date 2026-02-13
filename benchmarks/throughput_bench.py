@@ -5,6 +5,7 @@ Measures wall-clock time for each algorithm across a range of light curve sizes.
 Outputs a CSV table and a log-scale plot.
 """
 
+import argparse
 import time
 import sys
 import os
@@ -17,10 +18,10 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 N_POINTS = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-N_CURVES = 100  # batch size for point-scaling sweep
+N_CURVES = 1000  # batch size for point-scaling sweep
 
 # Curve-count scaling parameters
-CURVE_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+CURVE_COUNTS = [100, 1000, 10000]
 FIXED_N_POINTS = 1024  # fixed point count for curve-scaling sweep
 
 N_PERIODS = 1000
@@ -185,20 +186,36 @@ def run_curve_scaling(backend_name, backend_mod):
 
 
 def main():
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(out_dir, "throughput_results.csv")
+    parser = argparse.ArgumentParser(description="Throughput benchmark")
+    parser.add_argument(
+        "-o", "--output",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "throughput_results.csv"),
+        help="Output CSV path (default: benchmarks/throughput_results.csv)",
+    )
+    parser.add_argument(
+        "--gpu-label", default="GPU",
+        help="Label for the GPU backend in the CSV (e.g. '1x P100', '2x P100')",
+    )
+    parser.add_argument(
+        "--gpu-only", action="store_true",
+        help="Skip the CPU backend, run GPU benchmarks only",
+    )
+    args = parser.parse_args()
+    csv_path = args.output
 
     all_results = []
 
     backends = []
-    try:
-        from periodfind import cpu as cpu_mod
-        backends.append(("CPU", cpu_mod))
-    except ImportError as e:
-        print(f"CPU backend not available: {e}", file=sys.stderr)
+    if not args.gpu_only:
+        try:
+            from periodfind import cpu as cpu_mod
+            backends.append(("CPU", cpu_mod))
+        except ImportError as e:
+            print(f"CPU backend not available: {e}", file=sys.stderr)
     try:
         from periodfind import gpu as gpu_mod
-        backends.append(("GPU", gpu_mod))
+        backends.append((args.gpu_label, gpu_mod))
     except ImportError as e:
         print(f"GPU backend not available: {e}", file=sys.stderr)
 

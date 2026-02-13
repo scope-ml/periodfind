@@ -5,6 +5,7 @@
 #include "fpw.h"
 
 #include <algorithm>
+#include <thread>
 
 #include "cuda_runtime.h"
 #include "math.h"
@@ -116,18 +117,38 @@ __global__ void FPWKernel(const float* __restrict__ times,
         __syncthreads();
     }
 
-    // Thread 0 computes the final FPW statistic from shared bins
-    if (threadIdx.x != 0)
-        return;
-
+    // Parallel reduction: each thread computes its bins' contribution
     float delta_chi = 0.0f;
-    for (size_t k = 0; k < n_bins; k++) {
+    for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
         if (sh_vtcinvv[k] > 0.0f) {
             delta_chi += sh_ytcinvv[k] * sh_ytcinvv[k] / (2.0f * sh_vtcinvv[k]);
         }
     }
 
-    fpw_out[period_idx * num_period_dts + pdt_idx] = delta_chi;
+    // Warp-level shuffle sum-reduction
+    const unsigned int FULL_MASK = 0xFFFFFFFF;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        delta_chi += __shfl_down_sync(FULL_MASK, delta_chi, offset);
+    }
+
+    // Warp leaders write partial sums to shared memory (reuse dead tile area)
+    const int NUM_WARPS = blockDim.x / 32;
+    float* sh_reduce = &sh_data[0];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    if (lane_id == 0) {
+        sh_reduce[warp_id] = delta_chi;
+    }
+    __syncthreads();
+
+    // Thread 0 sums across warp results
+    if (threadIdx.x == 0) {
+        delta_chi = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) {
+            delta_chi += sh_reduce[w];
+        }
+        fpw_out[period_idx * num_period_dts + pdt_idx] = delta_chi;
+    }
 }
 
 //
@@ -185,8 +206,10 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
 
     std::vector<FPWDeviceState> dev_state(num_devices);
 
-    // Phase 1: Allocate and enqueue on each device
+    // Phase 1: Allocate and enqueue on each device (one thread per GPU)
+    std::vector<std::thread> dev_threads;
     for (int d = 0; d < num_devices; d++) {
+        dev_threads.emplace_back([&, d]() {
         gpuErrchk(cudaSetDevice(d));
 
         size_t start = d * base_count + std::min((size_t)d, remainder);
@@ -269,7 +292,9 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
                                       per_out_size, cudaMemcpyDeviceToHost,
                                       stream));
         }
+        });
     }
+    for (auto& t : dev_threads) t.join();
 
     // Phase 2: Sync and free on each device
     for (int d = 0; d < num_devices; d++) {

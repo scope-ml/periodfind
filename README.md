@@ -99,34 +99,36 @@ features = fd.calc(times, mags, errs, periods)
 
 ## Throughput Benchmarks
 
-Measured on a batch of **100 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon on 2x Intel Xeon E5-2680 v4 (28 cores); GPU = single NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
+Measured on a batch of **1,000 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon (28 cores, Skylake Xeon); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
 
 ### Throughput table (points/sec)
 
 | pts/curve | Backend | CE | AOV | LS | FPW | BLS |
 |----------:|---------|---:|----:|---:|----:|----:|
-| 256 | CPU | 99K | 116K | 95K | 113K | 56K |
-| 256 | GPU | 930K | 956K | 1.0M | 720K | 97K |
-| 256 | **Speedup** | **9.4x** | **8.2x** | **10.7x** | **6.4x** | **1.7x** |
-| 1,024 | CPU | 136K | 137K | 126K | 140K | 112K |
-| 1,024 | GPU | 3.2M | 3.0M | 3.8M | 2.4M | 378K |
-| 1,024 | **Speedup** | **24x** | **22x** | **30x** | **17x** | **3.4x** |
-| 4,096 | CPU | 145K | 132K | 142K | 162K | 193K |
-| 4,096 | GPU | 8.9M | 3.5M | 11.8M | 2.4M | 1.4M |
-| 4,096 | **Speedup** | **61x** | **26x** | **83x** | **15x** | **7.3x** |
-| 16,384 | CPU | 133K | 150K | 117K | 181K | 194K |
-| 16,384 | GPU | 16.9M | 2.3M | 25.1M | 1.3M | 2.2M |
-| 16,384 | **Speedup** | **127x** | **16x** | **216x** | **7.2x** | **11x** |
+| 256 | CPU | 498K | 581K | 527K | 658K | 469K |
+| 256 | 1x P100 | 1.1M | 1.1M | 1.2M | 1.1M | 978K |
+| 256 | 2x P100 | 1.2M | 1.3M | 1.3M | 1.3M | 1.2M |
+| 1,024 | CPU | 938K | 1.1M | 979K | 1.2M | 1.1M |
+| 1,024 | 1x P100 | 3.7M | 3.4M | 4.4M | 2.6M | 3.1M |
+| 1,024 | 2x P100 | 4.4M | 4.3M | 5.1M | 3.7M | 4.0M |
+| 4,096 | CPU | 1.2M | 1.4M | 1.3M | 1.9M | 1.8M |
+| 4,096 | 1x P100 | 10.3M | 3.9M | 13.1M | 2.5M | 6.1M |
+| 4,096 | 2x P100 | 13.9M | 6.8M | 16.5M | 4.5M | 9.8M |
+| 16,384 | CPU | 1.3M | 1.5M | 1.4M | 2.1M | 2.1M |
+| 16,384 | 1x P100 | 17.9M | 2.4M | 26.6M | 1.3M | 3.6M |
+| 16,384 | 2x P100 | 28.9M | 4.8M | 40.5M | 2.6M | 7.0M |
+
+All five algorithms are now faster on GPU than CPU. At 16K points, 2x P100 achieves near-linear multi-GPU scaling (1.5--2.0x over 1x P100).
 
 ### Throughput plot (log-log scale)
 
 ![Throughput benchmark](docs/throughput_points.png)
 
-Solid lines = GPU (CUDA), dashed lines = CPU (Rust). The GPU advantage grows with light curve length for most algorithms, with LS showing the largest speedup (up to 216x). A separate curve-count scaling sweep (1–512 curves at 1,024 pts/curve) shows GPU throughput plateauing once the device is fully occupied.
+Solid lines = 1x P100, dash-dot = 2x P100, dashed lines = CPU (Rust). All algorithms benefit from the GPU, with LS reaching 40M pts/sec on 2x P100 (29x over CPU). BLS and FPW now show strong GPU speedups thanks to parallelized final-phase kernels and threaded multi-GPU dispatch.
 
-See the [full benchmarks page](https://zwickytransientfacility.github.io/periodfind/benchmarks/) for curve-scaling results and methodology.
+See the [full benchmarks page](https://zwickytransientfacility.github.io/periodfind/benchmarks/) for curve-scaling results, 2x P100 data, and methodology.
 
-To reproduce, run `python benchmarks/throughput_bench.py` followed by `python benchmarks/plot_throughput.py`.
+To reproduce, run `python benchmarks/throughput_bench.py` followed by `python benchmarks/plot_throughput.py`. Use `sbatch benchmarks/run_bench.sh` for multi-GPU benchmarks on a SLURM cluster.
 
 ## Installing
 

@@ -6,6 +6,7 @@
 #include "ce.h"
 
 #include <algorithm>
+#include <thread>
 #include <iostream>
 
 #include "cuda_runtime.h"
@@ -462,8 +463,10 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
 
     std::vector<CEDeviceState> dev_state(num_devices);
 
-    // Phase 1: Allocate and enqueue on each device
+    // Phase 1: Allocate and enqueue on each device (one thread per GPU)
+    std::vector<std::thread> dev_threads;
     for (int d = 0; d < num_devices; d++) {
+        dev_threads.emplace_back([&, d]() {
         gpuErrchk(cudaSetDevice(d));
 
         size_t start = d * base_count + std::min((size_t)d, remainder);
@@ -535,7 +538,9 @@ void ConditionalEntropy::CalcCEValsBatched(const std::vector<float*>& times,
                                       ce_out_size, cudaMemcpyDeviceToHost,
                                       stream));
         }
+        });
     }
+    for (auto& t : dev_threads) t.join();
 
     // Phase 2: Sync and free on each device
     for (int d = 0; d < num_devices; d++) {

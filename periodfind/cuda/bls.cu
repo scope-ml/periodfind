@@ -6,6 +6,7 @@
 #include "bls.h"
 
 #include <algorithm>
+#include <thread>
 
 #include "cuda_runtime.h"
 #include "math.h"
@@ -45,9 +46,6 @@ __host__ __device__ float BLS::Qmax() const {
 
 // Tile size for shared-memory light curve tiling
 #define BLS_TILE_SIZE 256
-
-// Maximum number of phase bins (for register-based accumulators)
-#define BLS_MAX_BINS 256
 
 __global__ void BLSKernel(const float* __restrict__ times,
                           const float* __restrict__ ivar,
@@ -129,23 +127,26 @@ __global__ void BLSKernel(const float* __restrict__ times,
         __syncthreads();
     }
 
-    // Thread 0 computes the BLS statistic from shared bins
-    if (threadIdx.x != 0)
-        return;
+    // Phase A: Thread 0 computes prefix sums into shared memory (reuse dead tile area)
+    float* sh_w_prefix = &sh_data[0];
+    float* sh_yw_prefix = &sh_data[n_bins + 1];
 
-    // Compute prefix sums
-    float w_prefix[BLS_MAX_BINS + 1];
-    float yw_prefix[BLS_MAX_BINS + 1];
-    w_prefix[0] = 0.0f;
-    yw_prefix[0] = 0.0f;
-    for (size_t k = 0; k < n_bins; k++) {
-        w_prefix[k + 1] = w_prefix[k] + sh_w_bin[k];
-        yw_prefix[k + 1] = yw_prefix[k] + sh_yw_bin[k];
+    if (threadIdx.x == 0) {
+        sh_w_prefix[0] = 0.0f;
+        sh_yw_prefix[0] = 0.0f;
+        for (size_t k = 0; k < n_bins; k++) {
+            sh_w_prefix[k + 1] = sh_w_prefix[k] + sh_w_bin[k];
+            sh_yw_prefix[k + 1] = sh_yw_prefix[k] + sh_yw_bin[k];
+        }
     }
-    float w_total = w_prefix[n_bins];
+    __syncthreads();
+
+    float w_total = sh_w_prefix[n_bins];
 
     if (w_total <= 0.0f) {
-        bls_out[period_idx * num_period_dts + pdt_idx] = 0.0f;
+        if (threadIdx.x == 0) {
+            bls_out[period_idx * num_period_dts + pdt_idx] = 0.0f;
+        }
         return;
     }
 
@@ -153,32 +154,61 @@ __global__ void BLSKernel(const float* __restrict__ times,
     size_t nb_min = max((size_t)1, (size_t)(params.Qmin() * n_bins));
     size_t nb_max = min(n_bins - 1, (size_t)ceilf(params.Qmax() * n_bins));
 
-    float best_bls = 0.0f;
+    // Phase B: All threads search the linearized (nb, phi) space
+    size_t nb_range = nb_max - nb_min + 1;
+    size_t total_pairs = nb_range * n_bins;
 
-    for (size_t nb = nb_min; nb <= nb_max; nb++) {
-        for (size_t phi = 0; phi < n_bins; phi++) {
-            size_t end = phi + nb;
-            float r, s;
-            if (end <= n_bins) {
-                r = w_prefix[end] - w_prefix[phi];
-                s = yw_prefix[end] - yw_prefix[phi];
-            } else {
-                size_t wrap = end - n_bins;
-                r = (w_prefix[n_bins] - w_prefix[phi]) + w_prefix[wrap];
-                s = (yw_prefix[n_bins] - yw_prefix[phi]) + yw_prefix[wrap];
-            }
+    float my_best_bls = 0.0f;
 
-            float r_frac = r / w_total;
-            if (r_frac > 0.0f && r_frac < 1.0f) {
-                float bls = (s * s) / (r * (w_total - r));
-                if (bls > best_bls) {
-                    best_bls = bls;
-                }
+    for (size_t idx = threadIdx.x; idx < total_pairs; idx += blockDim.x) {
+        size_t nb = nb_min + idx / n_bins;
+        size_t phi = idx % n_bins;
+
+        size_t end = phi + nb;
+        float r, s;
+        if (end <= n_bins) {
+            r = sh_w_prefix[end] - sh_w_prefix[phi];
+            s = sh_yw_prefix[end] - sh_yw_prefix[phi];
+        } else {
+            size_t wrap = end - n_bins;
+            r = (sh_w_prefix[n_bins] - sh_w_prefix[phi]) + sh_w_prefix[wrap];
+            s = (sh_yw_prefix[n_bins] - sh_yw_prefix[phi]) + sh_yw_prefix[wrap];
+        }
+
+        float r_frac = r / w_total;
+        if (r_frac > 0.0f && r_frac < 1.0f) {
+            float bls = (s * s) / (r * (w_total - r));
+            if (bls > my_best_bls) {
+                my_best_bls = bls;
             }
         }
     }
 
-    bls_out[period_idx * num_period_dts + pdt_idx] = best_bls;
+    // Phase C: Parallel max-reduction via warp shuffle
+    const unsigned int FULL_MASK = 0xFFFFFFFF;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        float other = __shfl_down_sync(FULL_MASK, my_best_bls, offset);
+        if (other > my_best_bls) my_best_bls = other;
+    }
+
+    // Warp leaders write to shared memory (reuse area after prefix sums)
+    const int NUM_WARPS = blockDim.x / 32;
+    float* sh_reduce = &sh_data[2 * (n_bins + 1)];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    if (lane_id == 0) {
+        sh_reduce[warp_id] = my_best_bls;
+    }
+    __syncthreads();
+
+    // Thread 0 finds global max across warps
+    if (threadIdx.x == 0) {
+        float best_bls = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) {
+            if (sh_reduce[w] > best_bls) best_bls = sh_reduce[w];
+        }
+        bls_out[period_idx * num_period_dts + pdt_idx] = best_bls;
+    }
 }
 
 //
@@ -236,8 +266,10 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
 
     std::vector<BLSDeviceState> dev_state(num_devices);
 
-    // Phase 1: Allocate and enqueue on each device
+    // Phase 1: Allocate and enqueue on each device (one thread per GPU)
+    std::vector<std::thread> dev_threads;
     for (int d = 0; d < num_devices; d++) {
+        dev_threads.emplace_back([&, d]() {
         gpuErrchk(cudaSetDevice(d));
 
         size_t start = d * base_count + std::min((size_t)d, remainder);
@@ -331,7 +363,9 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
                                       per_out_size, cudaMemcpyDeviceToHost,
                                       stream));
         }
+        });
     }
+    for (auto& t : dev_threads) t.join();
 
     // Phase 2: Sync and free on each device
     for (int d = 0; d < num_devices; d++) {

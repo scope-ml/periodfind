@@ -8,11 +8,12 @@ Produces two plots:
 
 import csv
 import os
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +28,15 @@ ALGO_STYLE = {
     "FPW": {"color": "#d62728", "marker": "D"},
     "BLS": {"color": "#9467bd", "marker": "v"},
 }
+
+# Linestyle and width per backend.  Backends are matched by name from the CSV.
+# "CPU" is always dashed; anything else is a GPU variant.
+BACKEND_STYLE = OrderedDict([
+    ("CPU",      {"linestyle": "--",  "linewidth": 2}),
+    ("GPU",      {"linestyle": "-",   "linewidth": 2}),
+    ("1x P100",  {"linestyle": "-",   "linewidth": 2}),
+    ("2x P100",  {"linestyle": "-.",  "linewidth": 2.5}),
+])
 
 
 def load_results(csv_path):
@@ -61,24 +71,29 @@ def plot_sweep(sweep_data, xlabel, title, output_path):
     """Plot a single sweep (point-scaling or curve-scaling) and save to PNG."""
     fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
-    for backend in ["GPU", "CPU"]:
-        if backend not in sweep_data:
-            continue
-        linestyle = "-" if backend == "GPU" else "--"
+    # Discover which backends are present, ordered by BACKEND_STYLE then any
+    # unknown backends appended at the end.
+    present = list(sweep_data.keys())
+    ordered_backends = [b for b in BACKEND_STYLE if b in present]
+    for b in present:
+        if b not in ordered_backends:
+            ordered_backends.append(b)
+
+    for backend in ordered_backends:
+        bstyle = BACKEND_STYLE.get(backend,
+                                   {"linestyle": "-.", "linewidth": 2.5})
         for algo in ["CE", "AOV", "LS", "FPW", "BLS"]:
             if algo not in sweep_data[backend]:
                 continue
             d = sweep_data[backend][algo]
             style = ALGO_STYLE[algo]
-            label = f"{algo} ({backend})"
             ax.plot(
                 d["x_vals"], d["throughput"],
                 color=style["color"],
                 marker=style["marker"],
-                linestyle=linestyle,
-                linewidth=2,
+                linestyle=bstyle["linestyle"],
+                linewidth=bstyle["linewidth"],
                 markersize=6,
-                label=label,
             )
 
     ax.set_xscale("log", base=2)
@@ -87,7 +102,31 @@ def plot_sweep(sweep_data, xlabel, title, output_path):
     ax.set_ylabel("Throughput (points / sec)", fontsize=13)
     ax.set_title(title, fontsize=14)
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(fontsize=9, ncol=2, loc="upper left")
+
+    # Two-part legend: algorithms (by color) + backends (by linestyle)
+    algo_handles = [
+        Line2D([0], [0], color=s["color"], marker=s["marker"],
+               linestyle="-", linewidth=2, markersize=6)
+        for algo, s in ALGO_STYLE.items()
+    ]
+    algo_labels = list(ALGO_STYLE.keys())
+
+    backend_handles = []
+    backend_labels = []
+    for b in ordered_backends:
+        bstyle = BACKEND_STYLE.get(b, {"linestyle": "-.", "linewidth": 2.5})
+        backend_handles.append(
+            Line2D([0], [0], color="black",
+                   linestyle=bstyle["linestyle"],
+                   linewidth=bstyle["linewidth"])
+        )
+        backend_labels.append(b)
+
+    leg1 = ax.legend(algo_handles, algo_labels, fontsize=10,
+                     loc="upper left", title="Algorithm", title_fontsize=10)
+    ax.add_artist(leg1)
+    ax.legend(backend_handles, backend_labels, fontsize=10,
+              loc="lower right", title="Backend", title_fontsize=10)
 
     # Custom x-tick labels
     xticks = sorted(set(
