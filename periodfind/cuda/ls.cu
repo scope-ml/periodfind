@@ -38,10 +38,18 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
                                   const size_t num_period_dts,
                                   const LombScargle params,
                                   float* __restrict__ periodogram) {
-    // Shared memory for tiling light curve data
+    // Shared memory layout: tile data + reduction workspace
+    // [0 .. LS_TILE_SIZE-1]              = sh_times
+    // [LS_TILE_SIZE .. 2*LS_TILE_SIZE-1] = sh_mags
+    // [2*LS_TILE_SIZE .. ]               = reduction workspace (4 * NUM_WARPS floats)
     extern __shared__ float sh_data[];
     float* sh_times = &sh_data[0];
     float* sh_mags = &sh_data[LS_TILE_SIZE];
+
+    const int NUM_WARPS = blockDim.x / 32;
+    float* sh_reduce = &sh_data[2 * LS_TILE_SIZE];
+    // sh_reduce layout: [mag_cos * NUM_WARPS, mag_sin * NUM_WARPS,
+    //                     cos_cos * NUM_WARPS, cos_sin * NUM_WARPS]
 
     // One block per (period, period_dt) pair
     const size_t period_idx = blockIdx.x;
@@ -55,7 +63,7 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
     const float period_dt = period_dts[pdt_idx];
     const float pdt_corr = (period_dt / period) / 2;
 
-    // Per-thread accumulators
+    // Per-thread accumulators — each thread processes a stripe
     float mag_cos = 0.0f;
     float mag_sin = 0.0f;
     float cos_cos = 0.0f;
@@ -78,8 +86,8 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
         }
         __syncthreads();
 
-        // Each thread accumulates over the entire tile
-        for (size_t i = 0; i < tile_len; i++) {
+        // Each thread accumulates over its stripe of the tile
+        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
             float t = sh_times[i];
             float mag = sh_mags[i];
 
@@ -96,9 +104,40 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
         __syncthreads();
     }
 
-    // Only thread 0 computes the final LS value (all threads have full sums)
+    // Parallel reduction: warp-level shuffle first
+    const unsigned int FULL_MASK = 0xFFFFFFFF;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        mag_cos += __shfl_down_sync(FULL_MASK, mag_cos, offset);
+        mag_sin += __shfl_down_sync(FULL_MASK, mag_sin, offset);
+        cos_cos += __shfl_down_sync(FULL_MASK, cos_cos, offset);
+        cos_sin += __shfl_down_sync(FULL_MASK, cos_sin, offset);
+    }
+
+    // Warp leaders write to shared memory
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    if (lane_id == 0) {
+        sh_reduce[0 * NUM_WARPS + warp_id] = mag_cos;
+        sh_reduce[1 * NUM_WARPS + warp_id] = mag_sin;
+        sh_reduce[2 * NUM_WARPS + warp_id] = cos_cos;
+        sh_reduce[3 * NUM_WARPS + warp_id] = cos_sin;
+    }
+    __syncthreads();
+
+    // Final reduction across warps (thread 0 only)
     if (threadIdx.x != 0)
         return;
+
+    mag_cos = 0.0f;
+    mag_sin = 0.0f;
+    cos_cos = 0.0f;
+    cos_sin = 0.0f;
+    for (int w = 0; w < NUM_WARPS; w++) {
+        mag_cos += sh_reduce[0 * NUM_WARPS + w];
+        mag_sin += sh_reduce[1 * NUM_WARPS + w];
+        cos_cos += sh_reduce[2 * NUM_WARPS + w];
+        cos_sin += sh_reduce[3 * NUM_WARPS + w];
+    }
 
     float sin_sin = static_cast<float>(length) - cos_cos;
 
@@ -141,7 +180,9 @@ float* LombScargle::DeviceCalcLS(const float* times,
 
     // One block per (period, period_dt) pair
     const size_t num_threads = 256;
-    const size_t shared_bytes = 2 * LS_TILE_SIZE * sizeof(float);
+    const size_t num_warps = num_threads / 32;
+    const size_t shared_bytes =
+        (2 * LS_TILE_SIZE + 4 * num_warps) * sizeof(float);
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
     LombScargleKernel<<<grid_dim, num_threads, shared_bytes>>>(
@@ -201,7 +242,9 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
 
     // Kernel launch information: one block per (period, period_dt) pair
     const size_t num_threads = 256;
-    const size_t shared_bytes = 2 * LS_TILE_SIZE * sizeof(float);
+    const size_t num_warps = num_threads / 32;
+    const size_t shared_bytes =
+        (2 * LS_TILE_SIZE + 4 * num_warps) * sizeof(float);
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
     // Buffer size (large enough for longest light curve)
@@ -209,8 +252,8 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     const size_t buffer_length = *max_length;
     const size_t buffer_bytes = sizeof(float) * buffer_length;
 
-    // Create 2 CUDA streams for double-buffered async transfers
-    const int NUM_STREAMS = 2;
+    // Create CUDA streams for multi-buffered async transfers
+    const int NUM_STREAMS = 4;
     cudaStream_t streams[NUM_STREAMS];
     for (int s = 0; s < NUM_STREAMS; s++) {
         gpuErrchk(cudaStreamCreate(&streams[s]));

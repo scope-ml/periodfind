@@ -29,7 +29,9 @@ pub fn calc_fpw(
     let total = n_periods * n_pdts;
     let results: Vec<f32> = (0..total)
         .into_par_iter()
-        .map(|flat_idx| {
+        .map_init(
+            || (vec![0.0_f32; num_bins], vec![0.0_f32; num_bins]),
+            |(vtcinvv, ytcinvv), flat_idx| {
             let period_idx = flat_idx / n_pdts;
             let pdt_idx = flat_idx % n_pdts;
 
@@ -37,9 +39,9 @@ pub fn calc_fpw(
             let period_dt = period_dts[pdt_idx];
             let pdt_corr = fold::pdt_correction(period, period_dt);
 
-            // Per-bin accumulators
-            let mut vtcinvv = vec![0.0_f32; num_bins]; // sum of ivar per bin
-            let mut ytcinvv = vec![0.0_f32; num_bins]; // sum of ivar*y per bin
+            // Zero reused bin accumulators
+            vtcinvv.iter_mut().for_each(|x| *x = 0.0);
+            ytcinvv.iter_mut().for_each(|x| *x = 0.0);
 
             for i in 0..n_data {
                 let phase = fold::fold_time(times[i], period, pdt_corr);
@@ -58,7 +60,7 @@ pub fn calc_fpw(
             }
 
             delta_chi
-        })
+        },)
         .collect();
 
     results

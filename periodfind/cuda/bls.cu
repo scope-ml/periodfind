@@ -59,7 +59,12 @@ __global__ void BLSKernel(const float* __restrict__ times,
                           const size_t num_period_dts,
                           const BLS params,
                           float* __restrict__ bls_out) {
-    // Shared memory for tiling light curve data
+    // Shared memory layout:
+    // [0 .. BLS_TILE_SIZE-1]                       = sh_times
+    // [BLS_TILE_SIZE .. 2*BLS_TILE_SIZE-1]         = sh_ivar
+    // [2*BLS_TILE_SIZE .. 3*BLS_TILE_SIZE-1]       = sh_ivar_yw
+    // [3*BLS_TILE_SIZE .. 3*BLS_TILE_SIZE+n_bins-1] = sh_w_bin
+    // [3*BLS_TILE_SIZE+n_bins .. ]                  = sh_yw_bin
     extern __shared__ float sh_data[];
     float* sh_times = &sh_data[0];
     float* sh_ivar = &sh_data[BLS_TILE_SIZE];
@@ -79,18 +84,18 @@ __global__ void BLSKernel(const float* __restrict__ times,
 
     const size_t n_bins = params.NumBins();
 
-    float i_part;
+    // Shared memory bin accumulators (after tile data)
+    float* sh_w_bin = &sh_data[3 * BLS_TILE_SIZE];
+    float* sh_yw_bin = &sh_data[3 * BLS_TILE_SIZE + n_bins];
 
-    // Thread-local bin accumulators (thread 0 only)
-    float w_bin[BLS_MAX_BINS];
-    float yw_bin[BLS_MAX_BINS];
-
-    if (threadIdx.x == 0) {
-        for (size_t k = 0; k < n_bins && k < BLS_MAX_BINS; k++) {
-            w_bin[k] = 0.0f;
-            yw_bin[k] = 0.0f;
-        }
+    // Cooperatively zero shared memory bins
+    for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
+        sh_w_bin[k] = 0.0f;
+        sh_yw_bin[k] = 0.0f;
     }
+    __syncthreads();
+
+    float i_part;
 
     // Process the light curve in tiles
     for (size_t tile_start = 0; tile_start < length;
@@ -108,25 +113,23 @@ __global__ void BLSKernel(const float* __restrict__ times,
         }
         __syncthreads();
 
-        // Thread 0 accumulates over the tile
-        if (threadIdx.x == 0) {
-            for (size_t i = 0; i < tile_len; i++) {
-                float t = sh_times[i];
-                float t_corr = t - pdt_corr * t * t;
-                float folded = fabsf(modff(t_corr / period, &i_part));
+        // All threads accumulate over their stripe of the tile
+        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            float t = sh_times[i];
+            float t_corr = t - pdt_corr * t * t;
+            float folded = fabsf(modff(t_corr / period, &i_part));
 
-                size_t bin = params.PhaseBin(folded);
-                if (bin >= n_bins)
-                    bin = n_bins - 1;
+            size_t bin = params.PhaseBin(folded);
+            if (bin >= n_bins)
+                bin = n_bins - 1;
 
-                w_bin[bin] += sh_ivar[i];
-                yw_bin[bin] += sh_ivar_yw[i];
-            }
+            atomicAdd(&sh_w_bin[bin], sh_ivar[i]);
+            atomicAdd(&sh_yw_bin[bin], sh_ivar_yw[i]);
         }
         __syncthreads();
     }
 
-    // Thread 0 computes the BLS statistic
+    // Thread 0 computes the BLS statistic from shared bins
     if (threadIdx.x != 0)
         return;
 
@@ -136,8 +139,8 @@ __global__ void BLSKernel(const float* __restrict__ times,
     w_prefix[0] = 0.0f;
     yw_prefix[0] = 0.0f;
     for (size_t k = 0; k < n_bins; k++) {
-        w_prefix[k + 1] = w_prefix[k] + w_bin[k];
-        yw_prefix[k + 1] = yw_prefix[k] + yw_bin[k];
+        w_prefix[k + 1] = w_prefix[k] + sh_w_bin[k];
+        yw_prefix[k + 1] = yw_prefix[k] + sh_yw_bin[k];
     }
     float w_total = w_prefix[n_bins];
 
@@ -206,7 +209,8 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
 
     // Kernel launch information: one block per (period, period_dt) pair
     const size_t num_threads = 256;
-    const size_t shared_bytes = 3 * BLS_TILE_SIZE * sizeof(float);
+    const size_t shared_bytes =
+        (3 * BLS_TILE_SIZE + 2 * NumBins()) * sizeof(float);
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
     // Buffer size (large enough for longest light curve)
@@ -215,7 +219,7 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
     const size_t buffer_bytes = sizeof(float) * buffer_length;
 
     // Create 2 CUDA streams for double-buffered async transfers
-    const int NUM_STREAMS = 2;
+    const int NUM_STREAMS = 4;
     cudaStream_t streams[NUM_STREAMS];
     for (int s = 0; s < NUM_STREAMS; s++) {
         gpuErrchk(cudaStreamCreate(&streams[s]));

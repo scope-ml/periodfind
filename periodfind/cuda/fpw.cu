@@ -46,7 +46,12 @@ __global__ void FPWKernel(const float* __restrict__ times,
                           const size_t num_period_dts,
                           const FPW params,
                           float* __restrict__ fpw_out) {
-    // Shared memory for tiling light curve data
+    // Shared memory layout:
+    // [0 .. FPW_TILE_SIZE-1]                       = sh_times
+    // [FPW_TILE_SIZE .. 2*FPW_TILE_SIZE-1]         = sh_ivar
+    // [2*FPW_TILE_SIZE .. 3*FPW_TILE_SIZE-1]       = sh_ivar_y
+    // [3*FPW_TILE_SIZE .. 3*FPW_TILE_SIZE+n_bins-1] = sh_vtcinvv
+    // [3*FPW_TILE_SIZE+n_bins .. ]                  = sh_ytcinvv
     extern __shared__ float sh_data[];
     float* sh_times = &sh_data[0];
     float* sh_ivar = &sh_data[FPW_TILE_SIZE];
@@ -66,31 +71,18 @@ __global__ void FPWKernel(const float* __restrict__ times,
 
     const size_t n_bins = params.NumBins();
 
-    // Thread-local bin accumulators (stored in registers/local memory)
-    // For small bin counts this is efficient; for large bin counts
-    // we'd want shared memory, but FPW typically uses 10-100 bins.
-    // We use dynamic shared memory for bins if we have enough space,
-    // otherwise fall back to thread-0 serial approach.
+    // Shared memory bin accumulators (after tile data)
+    float* sh_vtcinvv = &sh_data[3 * FPW_TILE_SIZE];
+    float* sh_ytcinvv = &sh_data[3 * FPW_TILE_SIZE + n_bins];
 
-    // Since all threads accumulate the same data, use thread 0 only
-    // (like Lomb-Scargle). Each thread loads data cooperatively but
-    // only thread 0 accumulates.
+    // Cooperatively zero shared memory bins
+    for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
+        sh_vtcinvv[k] = 0.0f;
+        sh_ytcinvv[k] = 0.0f;
+    }
+    __syncthreads();
 
     float i_part;
-
-    // We'll have thread 0 do all the accumulation after cooperative load
-    // Allocate bin arrays in registers for thread 0
-    // For bins > 256 this won't work well, but FPW uses 10-100 bins typically
-
-    float vtcinvv[256];  // max bins capped at 256
-    float ytcinvv[256];
-
-    if (threadIdx.x == 0) {
-        for (size_t k = 0; k < n_bins && k < 256; k++) {
-            vtcinvv[k] = 0.0f;
-            ytcinvv[k] = 0.0f;
-        }
-    }
 
     // Process the light curve in tiles
     for (size_t tile_start = 0; tile_start < length;
@@ -108,32 +100,30 @@ __global__ void FPWKernel(const float* __restrict__ times,
         }
         __syncthreads();
 
-        // Thread 0 accumulates over the tile
-        if (threadIdx.x == 0) {
-            for (size_t i = 0; i < tile_len; i++) {
-                float t = sh_times[i];
-                float t_corr = t - pdt_corr * t * t;
-                float folded = fabsf(modff(t_corr / period, &i_part));
+        // All threads accumulate over their stripe of the tile
+        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            float t = sh_times[i];
+            float t_corr = t - pdt_corr * t * t;
+            float folded = fabsf(modff(t_corr / period, &i_part));
 
-                size_t bin = params.PhaseBin(folded);
-                if (bin >= n_bins)
-                    bin = n_bins - 1;
+            size_t bin = params.PhaseBin(folded);
+            if (bin >= n_bins)
+                bin = n_bins - 1;
 
-                vtcinvv[bin] += sh_ivar[i];
-                ytcinvv[bin] += sh_ivar_y[i];
-            }
+            atomicAdd(&sh_vtcinvv[bin], sh_ivar[i]);
+            atomicAdd(&sh_ytcinvv[bin], sh_ivar_y[i]);
         }
         __syncthreads();
     }
 
-    // Thread 0 computes the final FPW statistic
+    // Thread 0 computes the final FPW statistic from shared bins
     if (threadIdx.x != 0)
         return;
 
     float delta_chi = 0.0f;
     for (size_t k = 0; k < n_bins; k++) {
-        if (vtcinvv[k] > 0.0f) {
-            delta_chi += ytcinvv[k] * ytcinvv[k] / (2.0f * vtcinvv[k]);
+        if (sh_vtcinvv[k] > 0.0f) {
+            delta_chi += sh_ytcinvv[k] * sh_ytcinvv[k] / (2.0f * sh_vtcinvv[k]);
         }
     }
 
@@ -168,7 +158,8 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
 
     // Kernel launch information: one block per (period, period_dt) pair
     const size_t num_threads = 256;
-    const size_t shared_bytes = 3 * FPW_TILE_SIZE * sizeof(float);
+    const size_t shared_bytes =
+        (3 * FPW_TILE_SIZE + 2 * NumBins()) * sizeof(float);
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
 
     // Buffer size (large enough for longest light curve)
@@ -177,7 +168,7 @@ void FPW::CalcFPWBatched(const std::vector<float*>& times,
     const size_t buffer_bytes = sizeof(float) * buffer_length;
 
     // Create 2 CUDA streams for double-buffered async transfers
-    const int NUM_STREAMS = 2;
+    const int NUM_STREAMS = 4;
     cudaStream_t streams[NUM_STREAMS];
     for (int s = 0; s < NUM_STREAMS; s++) {
         gpuErrchk(cudaStreamCreate(&streams[s]));

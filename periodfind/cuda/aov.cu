@@ -339,7 +339,7 @@ void AOV::CalcAOVValsBatched(const std::vector<float*>& times,
     const size_t buffer_bytes = sizeof(float) * buffer_length;
 
     // Create 2 CUDA streams for double-buffered async transfers
-    const int NUM_STREAMS = 2;
+    const int NUM_STREAMS = 4;
     cudaStream_t streams[NUM_STREAMS];
     for (int s = 0; s < NUM_STREAMS; s++) {
         gpuErrchk(cudaStreamCreate(&streams[s]));

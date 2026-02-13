@@ -105,24 +105,24 @@ Measured on a batch of **100 light curves** over **1,000 trial periods** (single
 
 | pts/curve | Backend | CE | AOV | LS | FPW | BLS |
 |----------:|---------|---:|----:|---:|----:|----:|
-| 256 | CPU | 36K | 130K | 106K | 194K | 95K |
-| 256 | GPU | 964K | 1.0M | 475K | 517K | 81K |
-| 256 | **Speedup** | **27x** | **7.8x** | **4.5x** | **2.7x** | **0.9x** |
-| 1,024 | CPU | 52K | 165K | 146K | 202K | 125K |
-| 1,024 | GPU | 3.4M | 3.2M | 687K | 817K | 228K |
-| 1,024 | **Speedup** | **65x** | **19x** | **4.7x** | **4.0x** | **1.8x** |
-| 4,096 | CPU | 67K | 179K | 166K | 169K | 222K |
-| 4,096 | GPU | 9.3M | 3.8M | 783K | 955K | 481K |
-| 4,096 | **Speedup** | **139x** | **21x** | **4.7x** | **5.6x** | **2.2x** |
-| 16,384 | CPU | 118K | 183K | 171K | 232K | 274K |
-| 16,384 | GPU | 17.1M | 2.4M | 797K | 995K | 778K |
-| 16,384 | **Speedup** | **145x** | **13x** | **4.7x** | **4.3x** | **2.8x** |
+| 256 | CPU | 54K | 86K | 62K | 118K | 43K |
+| 256 | GPU | 994K | 1.1M | 1.1M | 1.0M | 99K |
+| 256 | **Speedup** | **18x** | **12x** | **18x** | **8.8x** | **2.3x** |
+| 1,024 | CPU | 80K | 99K | 76K | 135K | 110K |
+| 1,024 | GPU | 3.5M | 3.3M | 4.2M | 2.5M | 390K |
+| 1,024 | **Speedup** | **44x** | **33x** | **56x** | **19x** | **3.5x** |
+| 4,096 | CPU | 94K | 108K | 96K | 152K | 148K |
+| 4,096 | GPU | 9.6M | 3.8M | 12.9M | 2.5M | 1.4M |
+| 4,096 | **Speedup** | **102x** | **35x** | **134x** | **16x** | **9.7x** |
+| 16,384 | CPU | 102K | 110K | 110K | 169K | 165K |
+| 16,384 | GPU | 17.8M | 2.4M | 26.4M | 1.3M | 2.2M |
+| 16,384 | **Speedup** | **174x** | **22x** | **240x** | **7.7x** | **13x** |
 
 ### Throughput plot (log-log scale)
 
 ![Throughput benchmark](docs/throughput.png)
 
-Solid lines = GPU (CUDA), dashed lines = CPU (Rust). The GPU advantage grows with light curve length for most algorithms, with CE showing the largest speedup (up to 145x). To reproduce, run `python benchmarks/throughput_bench.py` followed by `python benchmarks/plot_throughput.py`.
+Solid lines = GPU (CUDA), dashed lines = CPU (Rust). The GPU advantage grows with light curve length for most algorithms, with LS showing the largest speedup (up to 240x). To reproduce, run `python benchmarks/throughput_bench.py` followed by `python benchmarks/plot_throughput.py`.
 
 ## Installing
 

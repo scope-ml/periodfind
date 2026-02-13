@@ -29,7 +29,15 @@ pub fn calc_aov(
     let total = n_periods * n_pdts;
     let results: Vec<f32> = (0..total)
         .into_par_iter()
-        .map(|flat_idx| {
+        .map_init(
+            || {
+                (
+                    vec![0u32; num_bins],
+                    vec![0.0_f32; num_bins],
+                    vec![0.0_f32; num_bins],
+                )
+            },
+            |(count, sums, sq_sums), flat_idx| {
             let period_idx = flat_idx / n_pdts;
             let pdt_idx = flat_idx % n_pdts;
 
@@ -37,10 +45,10 @@ pub fn calc_aov(
             let period_dt = period_dts[pdt_idx];
             let pdt_corr = fold::pdt_correction(period, period_dt);
 
-            // Per-bin accumulators: count, sum, sum of squares
-            let mut count = vec![0u32; num_bins];
-            let mut sums = vec![0.0_f32; num_bins];
-            let mut sq_sums = vec![0.0_f32; num_bins];
+            // Zero reused bin accumulators
+            count.iter_mut().for_each(|x| *x = 0);
+            sums.iter_mut().for_each(|x| *x = 0.0);
+            sq_sums.iter_mut().for_each(|x| *x = 0.0);
 
             for i in 0..length {
                 let folded = fold::fold_time(times[i], period, pdt_corr);
@@ -74,7 +82,7 @@ pub fn calc_aov(
             } else {
                 ((length as f32 - num_bins as f32) / (num_bins as f32 - 1.0)) * (s1 / s2)
             }
-        })
+        },)
         .collect();
 
     results

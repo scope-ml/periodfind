@@ -53,7 +53,16 @@ pub fn calc_bls(
     let total = n_periods * n_pdts;
     let results: Vec<f32> = (0..total)
         .into_par_iter()
-        .map(|flat_idx| {
+        .map_init(
+            || {
+                (
+                    vec![0.0_f32; num_bins],
+                    vec![0.0_f32; num_bins],
+                    vec![0.0_f32; num_bins + 1],
+                    vec![0.0_f32; num_bins + 1],
+                )
+            },
+            |(w_bin, yw_bin, w_prefix, yw_prefix), flat_idx| {
             let period_idx = flat_idx / n_pdts;
             let pdt_idx = flat_idx % n_pdts;
 
@@ -61,9 +70,9 @@ pub fn calc_bls(
             let period_dt = period_dts[pdt_idx];
             let pdt_corr = fold::pdt_correction(period, period_dt);
 
-            // Per-bin accumulators
-            let mut w_bin = vec![0.0_f32; num_bins];
-            let mut yw_bin = vec![0.0_f32; num_bins];
+            // Zero reused bin accumulators
+            w_bin.iter_mut().for_each(|x| *x = 0.0);
+            yw_bin.iter_mut().for_each(|x| *x = 0.0);
 
             for i in 0..n_data {
                 let phase = fold::fold_time(times[i], period, pdt_corr);
@@ -73,8 +82,8 @@ pub fn calc_bls(
             }
 
             // Prefix sums for O(1) range queries (circular)
-            let mut w_prefix = vec![0.0_f32; num_bins + 1];
-            let mut yw_prefix = vec![0.0_f32; num_bins + 1];
+            w_prefix[0] = 0.0;
+            yw_prefix[0] = 0.0;
             for k in 0..num_bins {
                 w_prefix[k + 1] = w_prefix[k] + w_bin[k];
                 yw_prefix[k + 1] = yw_prefix[k] + yw_bin[k];
@@ -118,7 +127,7 @@ pub fn calc_bls(
             }
 
             best_bls
-        })
+        },)
         .collect();
 
     results

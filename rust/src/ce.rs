@@ -34,7 +34,9 @@ pub fn calc_ce(
     let total = n_periods * n_pdts;
     let results: Vec<f32> = (0..total)
         .into_par_iter()
-        .map(|flat_idx| {
+        .map_init(
+            || vec![0u32; num_bins],
+            |hist, flat_idx| {
             let period_idx = flat_idx / n_pdts;
             let pdt_idx = flat_idx % n_pdts;
 
@@ -42,8 +44,8 @@ pub fn calc_ce(
             let period_dt = period_dts[pdt_idx];
             let pdt_corr = fold::pdt_correction(period, period_dt);
 
-            // Build histogram
-            let mut hist = vec![0u32; num_bins];
+            // Zero reused histogram
+            hist.iter_mut().for_each(|x| *x = 0);
 
             for i in 0..length {
                 let folded = fold::fold_time(times[i], period, pdt_corr);
@@ -82,7 +84,7 @@ pub fn calc_ce(
             }
 
             ce
-        })
+        },)
         .collect();
 
     results
