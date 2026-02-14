@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "periodfind"
-version = "0.0.6"
+version = "0.1.0"
 description = "GPU-accelerated period finding utilities"
 readme = "README.md"
-license = "BSD-3-Clause"
+license = {text = "BSD-3-Clause"}
 requires-python = ">=3.8"
 authors = [
     {name = "Ethan Jaszewski", email = "ethanjaszewski@yahoo.com"},
+    {name = "Michael Coughlin", email = "cough052@umn.edu"},
 ]
 keywords = ["astronomy"]
 classifiers = [
@@ -26,8 +27,8 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA",
 ]
 dependencies = [
-    "cython",
     "numpy",
+    "periodfind_cpu>=0.1.0",
 ]
 
 [project.urls]

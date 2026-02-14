@@ -1,10 +1,15 @@
 import os
-from distutils.extension import Extension
 from os.path import join as pjoin
 
 import numpy
-from Cython.Distutils import build_ext
 from setuptools import setup
+
+try:
+    from Cython.Distutils import build_ext
+
+    HAS_CYTHON = True
+except ImportError:
+    HAS_CYTHON = False
 
 
 def find_in_path(name, path):
@@ -98,112 +103,121 @@ def customize_compiler_for_nvcc(self):
     self._compile = _compile
 
 
-# Run the customize_compiler
-class custom_build_ext(build_ext):
-    def build_extensions(self):
-        customize_compiler_for_nvcc(self.compiler)
-        build_ext.build_extensions(self)
-
-
-CUDA = locate_cuda()
-
-# Obtain the numpy include directory. This logic works across numpy versions.
 try:
-    numpy_include = numpy.get_include()
-except AttributeError:
-    numpy_include = numpy.get_numpy_include()
+    CUDA = locate_cuda()
+except OSError:
+    CUDA = None
 
-# Arguments for both NVCC and GCC
-compiler_flags = ["-std=c++14", "-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION"]
-gcc_only_flags = []
-nvcc_only_flags = ["-c", "--compiler-options", "'-fPIC'", "-use_fast_math"]
+if CUDA is not None and HAS_CYTHON:
+    from distutils.extension import Extension
 
-# Generate the gencode arguments
-compute_capabilities = [50, 52, 60, 61, 70, 75, 80, 86, 89, 90]
-cuda_arch_flags = [f"-gencode=arch=compute_{cap},code=sm_{cap}" for cap in compute_capabilities]
-cuda_arch_flags.append(
-    f"-gencode=arch=compute_{compute_capabilities[-1]},code=compute_{compute_capabilities[-1]}"
-)
+    # Run the customize_compiler
+    class custom_build_ext(build_ext):
+        def build_extensions(self):
+            customize_compiler_for_nvcc(self.compiler)
+            build_ext.build_extensions(self)
 
-# Final Args
-gcc_flags = gcc_only_flags + compiler_flags
-nvcc_flags = nvcc_only_flags + compiler_flags + cuda_arch_flags
+    # Obtain the numpy include directory. This logic works across numpy versions.
+    try:
+        numpy_include = numpy.get_include()
+    except AttributeError:
+        numpy_include = numpy.get_numpy_include()
 
-extensions = [
-    Extension(
-        "periodfind.ce",
-        sources=["periodfind/cuda/ce.cu", "periodfind/ce.pyx"],
-        language="c++",
-        libraries=["cudart"],
-        library_dirs=[CUDA["lib64"]],
-        runtime_library_dirs=[CUDA["lib64"]],
-        include_dirs=[numpy_include, CUDA["include"]],
-        extra_compile_args={
-            "gcc": gcc_flags,
-            "nvcc": nvcc_flags,
-        },
-    ),
-    Extension(
-        "periodfind.aov",
-        sources=["periodfind/cuda/aov.cu", "periodfind/aov.pyx"],
-        language="c++",
-        libraries=["cudart"],
-        library_dirs=[CUDA["lib64"]],
-        runtime_library_dirs=[CUDA["lib64"]],
-        include_dirs=[numpy_include, CUDA["include"]],
-        extra_compile_args={
-            "gcc": gcc_flags,
-            "nvcc": nvcc_flags,
-        },
-    ),
-    Extension(
-        "periodfind.ls",
-        sources=["periodfind/cuda/ls.cu", "periodfind/ls.pyx"],
-        language="c++",
-        libraries=["cudart"],
-        library_dirs=[CUDA["lib64"]],
-        runtime_library_dirs=[CUDA["lib64"]],
-        include_dirs=[numpy_include, CUDA["include"]],
-        extra_compile_args={
-            "gcc": gcc_flags,
-            "nvcc": nvcc_flags,
-        },
-    ),
-    Extension(
-        "periodfind.fpw",
-        sources=["periodfind/cuda/fpw.cu", "periodfind/fpw.pyx"],
-        language="c++",
-        libraries=["cudart"],
-        library_dirs=[CUDA["lib64"]],
-        runtime_library_dirs=[CUDA["lib64"]],
-        include_dirs=[numpy_include, CUDA["include"]],
-        extra_compile_args={
-            "gcc": gcc_flags,
-            "nvcc": nvcc_flags,
-        },
-    ),
-    Extension(
-        "periodfind.bls",
-        sources=["periodfind/cuda/bls.cu", "periodfind/bls.pyx"],
-        language="c++",
-        libraries=["cudart"],
-        library_dirs=[CUDA["lib64"]],
-        runtime_library_dirs=[CUDA["lib64"]],
-        include_dirs=[numpy_include, CUDA["include"]],
-        extra_compile_args={
-            "gcc": gcc_flags,
-            "nvcc": nvcc_flags,
-        },
-    ),
-]
+    # Arguments for both NVCC and GCC
+    compiler_flags = ["-std=c++14", "-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION"]
+    gcc_only_flags = []
+    nvcc_only_flags = ["-c", "--compiler-options", "'-fPIC'", "-use_fast_math"]
+
+    # Generate the gencode arguments
+    compute_capabilities = [50, 52, 60, 61, 70, 75, 80, 86, 89, 90]
+    cuda_arch_flags = [f"-gencode=arch=compute_{cap},code=sm_{cap}" for cap in compute_capabilities]
+    cuda_arch_flags.append(
+        f"-gencode=arch=compute_{compute_capabilities[-1]},code=compute_{compute_capabilities[-1]}"
+    )
+
+    # Final Args
+    gcc_flags = gcc_only_flags + compiler_flags
+    nvcc_flags = nvcc_only_flags + compiler_flags + cuda_arch_flags
+
+    extensions = [
+        Extension(
+            "periodfind.ce",
+            sources=["periodfind/cuda/ce.cu", "periodfind/ce.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+        Extension(
+            "periodfind.aov",
+            sources=["periodfind/cuda/aov.cu", "periodfind/aov.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+        Extension(
+            "periodfind.ls",
+            sources=["periodfind/cuda/ls.cu", "periodfind/ls.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+        Extension(
+            "periodfind.fpw",
+            sources=["periodfind/cuda/fpw.cu", "periodfind/fpw.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+        Extension(
+            "periodfind.bls",
+            sources=["periodfind/cuda/bls.cu", "periodfind/bls.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+    ]
+    cmdclass = {"build_ext": custom_build_ext}
+else:
+    extensions = []
+    cmdclass = {}
 
 setup(
     name="periodfind",
-    version="0.0.6",
+    version="0.1.0",
     description="GPU-accelerated period finding utilities",
     url="https://github.com/ZwickyTransientFacility/periodfind",
-    author="Ethan Jaszewski",
-    author_email="ethanjaszewski@yahoo.com",
+    author="Ethan Jaszewski, Michael Coughlin",
+    author_email="ethanjaszewski@yahoo.com, cough052@umn.edu",
     classifiers=[
         "License :: OSI Approved :: BSD License",
         "Operating System :: POSIX :: Linux",
@@ -218,12 +232,12 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        "cython",
         "numpy",
+        "periodfind_cpu>=0.1.0",
     ],
     keywords=["astronomy"],
     packages=["periodfind", "periodfind.cpu", "periodfind.gpu"],
     ext_modules=extensions,
-    cmdclass={"build_ext": custom_build_ext},
+    cmdclass=cmdclass,
     zip_safe=False,
 )
