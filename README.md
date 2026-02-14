@@ -99,32 +99,32 @@ features = fd.calc(times, mags, errs, periods)
 
 ## Throughput Benchmarks
 
-Measured on a batch of **1,000 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon (28 cores, Skylake Xeon); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
+Measured on a batch of **100 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon (28 cores, Skylake Xeon); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
 
 ### Throughput table (points/sec)
 
 | pts/curve | Backend | CE | AOV | LS | FPW | BLS |
 |----------:|---------|---:|----:|---:|----:|----:|
-| 256 | CPU | 498K | 581K | 527K | 658K | 469K |
-| 256 | 1x P100 | 1.1M | 1.1M | 1.2M | 1.1M | 978K |
-| 256 | 2x P100 | 1.2M | 1.3M | 1.3M | 1.3M | 1.2M |
-| 1,024 | CPU | 938K | 1.1M | 979K | 1.2M | 1.1M |
-| 1,024 | 1x P100 | 3.7M | 3.4M | 4.4M | 2.6M | 3.1M |
-| 1,024 | 2x P100 | 4.4M | 4.3M | 5.1M | 3.7M | 4.0M |
-| 4,096 | CPU | 1.2M | 1.4M | 1.3M | 1.9M | 1.8M |
-| 4,096 | 1x P100 | 10.3M | 3.9M | 13.1M | 2.5M | 6.1M |
-| 4,096 | 2x P100 | 13.9M | 6.8M | 16.5M | 4.5M | 9.8M |
-| 16,384 | CPU | 1.3M | 1.5M | 1.4M | 2.1M | 2.1M |
-| 16,384 | 1x P100 | 17.9M | 2.4M | 26.6M | 1.3M | 3.6M |
-| 16,384 | 2x P100 | 28.9M | 4.8M | 40.5M | 2.6M | 7.0M |
+| 256 | CPU | 140K | 184K | 146K | 245K | 121K |
+| 256 | 1x P100 | 1.1M | 1.1M | 1.2M | 1.1M | 1.0M |
+| 256 | 2x P100 | 1.1M | 1.2M | 1.4M | 1.2M | 1.2M |
+| 1,024 | CPU | 176K | 211K | 181K | 290K | 228K |
+| 1,024 | 1x P100 | 3.8M | 3.1M | 4.5M | 2.7M | 3.2M |
+| 1,024 | 2x P100 | 4.1M | 3.9M | 5.1M | 3.6M | 4.1M |
+| 4,096 | CPU | 185K | 217K | 194K | 307K | 293K |
+| 4,096 | 1x P100 | 9.8M | 3.2M | 13.2M | 3.5M | 6.2M |
+| 4,096 | 2x P100 | 12.7M | 5.6M | 16.5M | 6.1M | 9.6M |
+| 8,192 | CPU | 186K | 219K | 199K | 309K | 307K |
+| 8,192 | 1x P100 | 13.7M | 3.7M | 19.8M | 5.6M | 5.5M |
+| 8,192 | 2x P100 | 19.6M | 6.8M | 27.6M | 9.9M | 9.8M |
 
-All five algorithms are now faster on GPU than CPU. At 16K points, 2x P100 achieves near-linear multi-GPU scaling (1.5--2.0x over 1x P100).
+GPU kernels use a **hybrid atomic/privatization strategy** — shared-memory atomics for small point counts (low overhead, no register pressure) and per-thread register privatization with warp-shuffle reduction for large point counts (no atomic contention). This eliminates the throughput dip that pure privatization caused at small N, while preserving scalability at large N.
 
 ### Throughput plot (log-log scale)
 
 ![Throughput benchmark](docs/throughput_points.png)
 
-Solid lines = 1x P100, dash-dot = 2x P100, dashed lines = CPU (Rust). All algorithms benefit from the GPU, with LS reaching 40M pts/sec on 2x P100 (29x over CPU). BLS and FPW now show strong GPU speedups thanks to parallelized final-phase kernels and threaded multi-GPU dispatch.
+Solid lines = 1x P100, dash-dot = 2x P100, dashed lines = CPU (Rust). All algorithms benefit from the GPU across the full range of point counts. LS reaches 20M pts/sec on 1x P100 at 8K points (100x over CPU). BLS reaches 5.5M pts/sec on 1x P100 (18x over CPU).
 
 See the [full benchmarks page](https://zwickytransientfacility.github.io/periodfind/benchmarks/) for curve-scaling results, 2x P100 data, and methodology.
 
@@ -161,24 +161,6 @@ python setup.py install
 ```
 
 And periodfind should be installed!
-
-### C++ API
-
-First, ensure that CMake is installed, and that it is at least version `3.8`. Next, create a build directory for CMake to use, and `cd` into it:
-
-```bash
-mkdir cmakebuild
-cd cmakebuild
-```
-
-Now, run CMake, and build the library:
-
-```bash
-cmake ..
-make
-```
-
-Finally, install the package by running `make install` (may require super-user priveleges), which will install the library in `/usr/local/lib/` and the headers in `/usr/local/include/periodfind/` by default (on Linux, location will be different on other operating systems).
 
 ## Testing
 

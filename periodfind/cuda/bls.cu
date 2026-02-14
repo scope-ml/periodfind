@@ -47,6 +47,12 @@ __host__ __device__ float BLS::Qmax() const {
 // Tile size for shared-memory light curve tiling
 #define BLS_TILE_SIZE 256
 
+// Compile-time max for per-thread register bin arrays
+#define BLS_MAX_BINS 64
+
+// Hybrid threshold: use atomics for small point counts, privatization for large
+#define BLS_HYBRID_THRESHOLD 8192
+
 __global__ void BLSKernel(const float* __restrict__ times,
                           const float* __restrict__ ivar,
                           const float* __restrict__ ivar_yw,
@@ -58,11 +64,11 @@ __global__ void BLSKernel(const float* __restrict__ times,
                           const BLS params,
                           float* __restrict__ bls_out) {
     // Shared memory layout:
-    // [0 .. BLS_TILE_SIZE-1]                       = sh_times
-    // [BLS_TILE_SIZE .. 2*BLS_TILE_SIZE-1]         = sh_ivar
-    // [2*BLS_TILE_SIZE .. 3*BLS_TILE_SIZE-1]       = sh_ivar_yw
-    // [3*BLS_TILE_SIZE .. 3*BLS_TILE_SIZE+n_bins-1] = sh_w_bin
-    // [3*BLS_TILE_SIZE+n_bins .. ]                  = sh_yw_bin
+    // Atomic path: [sh_times | sh_ivar | sh_ivar_yw | sh_w_bin | sh_yw_bin]
+    //              = 3*TILE_SIZE + 2*n_bins (used simultaneously)
+    // Privatization path: phase 1 tiles (3*TILE_SIZE), then reduction
+    //                     (2*NUM_WARPS*n_bins), used sequentially
+    // Both paths converge into prefix sums at sh_data[0..2*(n_bins+1)-1]
     extern __shared__ float sh_data[];
     float* sh_times = &sh_data[0];
     float* sh_ivar = &sh_data[BLS_TILE_SIZE];
@@ -82,64 +88,161 @@ __global__ void BLSKernel(const float* __restrict__ times,
 
     const size_t n_bins = params.NumBins();
 
-    // Shared memory bin accumulators (after tile data)
-    float* sh_w_bin = &sh_data[3 * BLS_TILE_SIZE];
-    float* sh_yw_bin = &sh_data[3 * BLS_TILE_SIZE + n_bins];
-
-    // Cooperatively zero shared memory bins
-    for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
-        sh_w_bin[k] = 0.0f;
-        sh_yw_bin[k] = 0.0f;
-    }
-    __syncthreads();
-
-    float i_part;
-
-    // Process the light curve in tiles
-    for (size_t tile_start = 0; tile_start < length;
-         tile_start += BLS_TILE_SIZE) {
-        size_t tile_end = tile_start + BLS_TILE_SIZE;
-        if (tile_end > length)
-            tile_end = length;
-        size_t tile_len = tile_end - tile_start;
-
-        // Cooperatively load tile into shared memory
-        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
-            sh_times[i] = times[tile_start + i];
-            sh_ivar[i] = ivar[tile_start + i];
-            sh_ivar_yw[i] = ivar_yw[tile_start + i];
-        }
-        __syncthreads();
-
-        // All threads accumulate over their stripe of the tile
-        for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
-            float t = sh_times[i];
-            float t_corr = t - pdt_corr * t * t;
-            float folded = fabsf(modff(t_corr / period, &i_part));
-
-            size_t bin = params.PhaseBin(folded);
-            if (bin >= n_bins)
-                bin = n_bins - 1;
-
-            atomicAdd(&sh_w_bin[bin], sh_ivar[i]);
-            atomicAdd(&sh_yw_bin[bin], sh_ivar_yw[i]);
-        }
-        __syncthreads();
-    }
-
-    // Phase A: Thread 0 computes prefix sums into shared memory (reuse dead tile area)
+    // Prefix sum arrays — both paths write here before convergence
     float* sh_w_prefix = &sh_data[0];
     float* sh_yw_prefix = &sh_data[n_bins + 1];
 
-    if (threadIdx.x == 0) {
-        sh_w_prefix[0] = 0.0f;
-        sh_yw_prefix[0] = 0.0f;
-        for (size_t k = 0; k < n_bins; k++) {
-            sh_w_prefix[k + 1] = sh_w_prefix[k] + sh_w_bin[k];
-            sh_yw_prefix[k + 1] = sh_yw_prefix[k] + sh_yw_bin[k];
+    const unsigned int FULL_MASK = 0xFFFFFFFF;
+    const int NUM_WARPS = blockDim.x / 32;
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+
+    if (length <= BLS_HYBRID_THRESHOLD) {
+        // === Atomic path: shared memory bins, no register pressure ===
+        float* sh_w_bin = &sh_data[3 * BLS_TILE_SIZE];
+        float* sh_yw_bin = &sh_data[3 * BLS_TILE_SIZE + n_bins];
+
+        // Cooperatively zero bins
+        for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
+            sh_w_bin[k] = 0.0f;
+            sh_yw_bin[k] = 0.0f;
         }
+        __syncthreads();
+
+        float i_part;
+
+        // Process the light curve in tiles
+        for (size_t tile_start = 0; tile_start < length;
+             tile_start += BLS_TILE_SIZE) {
+            size_t tile_end = tile_start + BLS_TILE_SIZE;
+            if (tile_end > length)
+                tile_end = length;
+            size_t tile_len = tile_end - tile_start;
+
+            // Cooperatively load tile into shared memory
+            for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                sh_times[i] = times[tile_start + i];
+                sh_ivar[i] = ivar[tile_start + i];
+                sh_ivar_yw[i] = ivar_yw[tile_start + i];
+            }
+            __syncthreads();
+
+            // Accumulate into shared bins via atomicAdd
+            for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                float t = sh_times[i];
+                float t_corr = t - pdt_corr * t * t;
+                float folded = fabsf(modff(t_corr / period, &i_part));
+
+                size_t bin = params.PhaseBin(folded);
+                if (bin >= n_bins)
+                    bin = n_bins - 1;
+
+                atomicAdd(&sh_w_bin[bin], sh_ivar[i]);
+                atomicAdd(&sh_yw_bin[bin], sh_ivar_yw[i]);
+            }
+            __syncthreads();
+        }
+
+        // Thread 0 computes prefix sums from shared bins
+        if (threadIdx.x == 0) {
+            sh_w_prefix[0] = 0.0f;
+            sh_yw_prefix[0] = 0.0f;
+            for (size_t k = 0; k < n_bins; k++) {
+                sh_w_prefix[k + 1] = sh_w_prefix[k] + sh_w_bin[k];
+                sh_yw_prefix[k + 1] = sh_yw_prefix[k] + sh_yw_bin[k];
+            }
+        }
+        __syncthreads();
+    } else {
+        // === Privatization path: per-thread register arrays ===
+
+        float my_w[BLS_MAX_BINS];
+        float my_yw[BLS_MAX_BINS];
+        for (size_t k = 0; k < n_bins; k++) {
+            my_w[k] = 0.0f;
+            my_yw[k] = 0.0f;
+        }
+
+        float i_part;
+
+        // Process the light curve in tiles
+        for (size_t tile_start = 0; tile_start < length;
+             tile_start += BLS_TILE_SIZE) {
+            size_t tile_end = tile_start + BLS_TILE_SIZE;
+            if (tile_end > length)
+                tile_end = length;
+            size_t tile_len = tile_end - tile_start;
+
+            // Cooperatively load tile into shared memory
+            for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                sh_times[i] = times[tile_start + i];
+                sh_ivar[i] = ivar[tile_start + i];
+                sh_ivar_yw[i] = ivar_yw[tile_start + i];
+            }
+            __syncthreads();
+
+            // All threads accumulate into private arrays (no atomics)
+            for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                float t = sh_times[i];
+                float t_corr = t - pdt_corr * t * t;
+                float folded = fabsf(modff(t_corr / period, &i_part));
+
+                size_t bin = params.PhaseBin(folded);
+                if (bin >= n_bins)
+                    bin = n_bins - 1;
+
+                my_w[bin] += sh_ivar[i];
+                my_yw[bin] += sh_ivar_yw[i];
+            }
+            __syncthreads();
+        }
+
+        // --- Reduce private bins across all threads ---
+
+        // Step 1: Warp-shuffle reduce each bin within each warp
+        for (size_t k = 0; k < n_bins; k++) {
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                my_w[k] += __shfl_down_sync(FULL_MASK, my_w[k], offset);
+                my_yw[k] += __shfl_down_sync(FULL_MASK, my_yw[k], offset);
+            }
+        }
+
+        // Step 2: Warp leaders write partial sums to shared memory
+        float* sh_reduce_w = &sh_data[0];
+        float* sh_reduce_yw = &sh_data[NUM_WARPS * n_bins];
+
+        if (lane_id == 0) {
+            for (size_t k = 0; k < n_bins; k++) {
+                sh_reduce_w[warp_id * n_bins + k] = my_w[k];
+                sh_reduce_yw[warp_id * n_bins + k] = my_yw[k];
+            }
+        }
+        __syncthreads();
+
+        // Step 3: Thread 0 aggregates across warps and computes prefix sums
+        if (threadIdx.x == 0) {
+            float w_bin[BLS_MAX_BINS];
+            float yw_bin[BLS_MAX_BINS];
+            for (size_t k = 0; k < n_bins; k++) {
+                w_bin[k] = 0.0f;
+                yw_bin[k] = 0.0f;
+                for (int w = 0; w < NUM_WARPS; w++) {
+                    w_bin[k] += sh_reduce_w[w * n_bins + k];
+                    yw_bin[k] += sh_reduce_yw[w * n_bins + k];
+                }
+            }
+
+            sh_w_prefix[0] = 0.0f;
+            sh_yw_prefix[0] = 0.0f;
+            for (size_t k = 0; k < n_bins; k++) {
+                sh_w_prefix[k + 1] = sh_w_prefix[k] + w_bin[k];
+                sh_yw_prefix[k + 1] = sh_yw_prefix[k] + yw_bin[k];
+            }
+        }
+        __syncthreads();
     }
-    __syncthreads();
+
+    // === Shared code: Phase B search + Phase C max reduction ===
 
     float w_total = sh_w_prefix[n_bins];
 
@@ -185,17 +288,13 @@ __global__ void BLSKernel(const float* __restrict__ times,
     }
 
     // Phase C: Parallel max-reduction via warp shuffle
-    const unsigned int FULL_MASK = 0xFFFFFFFF;
     for (int offset = 16; offset > 0; offset >>= 1) {
         float other = __shfl_down_sync(FULL_MASK, my_best_bls, offset);
         if (other > my_best_bls) my_best_bls = other;
     }
 
     // Warp leaders write to shared memory (reuse area after prefix sums)
-    const int NUM_WARPS = blockDim.x / 32;
     float* sh_reduce = &sh_data[2 * (n_bins + 1)];
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
     if (lane_id == 0) {
         sh_reduce[warp_id] = my_best_bls;
     }
@@ -254,6 +353,9 @@ void BLS::CalcBLSBatched(const std::vector<float*>& times,
 
     // Kernel launch information: one block per (period, period_dt) pair
     const size_t num_threads = 256;
+    // Shared memory: atomic path needs 3*TILE_SIZE + 2*n_bins (simultaneous),
+    // privatization needs max(3*TILE_SIZE, 2*NUM_WARPS*n_bins) (sequential).
+    // The atomic layout always dominates, so use it for both paths.
     const size_t shared_bytes =
         (3 * BLS_TILE_SIZE + 2 * NumBins()) * sizeof(float);
     const dim3 grid_dim = dim3(num_periods, num_p_dts);

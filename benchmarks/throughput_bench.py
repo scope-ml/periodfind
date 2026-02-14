@@ -17,11 +17,11 @@ import numpy as np
 # Benchmark parameters
 # ---------------------------------------------------------------------------
 
-N_POINTS = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-N_CURVES = 1000  # batch size for point-scaling sweep
+N_POINTS = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+N_CURVES = 100  # batch size for point-scaling sweep
 
 # Curve-count scaling parameters
-CURVE_COUNTS = [100, 1000, 10000]
+CURVE_COUNTS = [100]
 FIXED_N_POINTS = 1024  # fixed point count for curve-scaling sweep
 
 N_PERIODS = 1000

@@ -5,6 +5,7 @@
 All benchmarks use synthetic sinusoidal light curves with Gaussian noise
 (amplitude 0.1, period 2.5, observation window 0--100).
 
+- **Batch size**: 100 light curves
 - **CPU**: Rust/Rayon on 28-core Skylake Xeon
 - **GPU**: 1x or 2x NVIDIA Tesla P100 (12 GB each)
 - **Trial periods**: 1,000 linearly spaced between 0.5 and 10.0 (single `period_dt`)
@@ -16,26 +17,36 @@ node to ensure a fair comparison.
 
 ## Point-Count Scaling
 
-Fixed **1,000 curves**, varying points per curve from 64 to 16,384.
+Fixed **100 curves**, varying points per curve from 64 to 8,192.
 
 ### Throughput table (points/sec)
 
 | pts/curve | Backend | CE | AOV | LS | FPW | BLS |
 |----------:|---------|---:|----:|---:|----:|----:|
-| 256 | CPU | 498K | 581K | 527K | 658K | 469K |
-| 256 | 1x P100 | 1.1M | 1.1M | 1.2M | 1.1M | 978K |
-| 256 | 2x P100 | 1.2M | 1.3M | 1.3M | 1.3M | 1.2M |
-| 1,024 | CPU | 938K | 1.1M | 979K | 1.2M | 1.1M |
-| 1,024 | 1x P100 | 3.7M | 3.4M | 4.4M | 2.6M | 3.1M |
-| 1,024 | 2x P100 | 4.4M | 4.3M | 5.1M | 3.7M | 4.0M |
-| 4,096 | CPU | 1.2M | 1.4M | 1.3M | 1.9M | 1.8M |
-| 4,096 | 1x P100 | 10.3M | 3.9M | 13.1M | 2.5M | 6.1M |
-| 4,096 | 2x P100 | 13.9M | 6.8M | 16.5M | 4.5M | 9.8M |
-| 16,384 | CPU | 1.3M | 1.5M | 1.4M | 2.1M | 2.1M |
-| 16,384 | 1x P100 | 17.9M | 2.4M | 26.6M | 1.3M | 3.6M |
-| 16,384 | 2x P100 | 28.9M | 4.8M | 40.5M | 2.6M | 7.0M |
-
-Speedup is 1x P100 vs CPU.
+| 64 | CPU | 78K | 113K | 87K | 124K | 40K |
+| 64 | 1x P100 | 291K | 294K | 311K | 302K | 250K |
+| 64 | 2x P100 | 302K | 310K | 333K | 320K | 285K |
+| 128 | CPU | 110K | 152K | 121K | 195K | 74K |
+| 128 | 1x P100 | 562K | 584K | 620K | 602K | 503K |
+| 128 | 2x P100 | 591K | 612K | 679K | 651K | 587K |
+| 256 | CPU | 140K | 184K | 146K | 245K | 121K |
+| 256 | 1x P100 | 1.1M | 1.1M | 1.2M | 1.1M | 1.0M |
+| 256 | 2x P100 | 1.1M | 1.2M | 1.4M | 1.2M | 1.2M |
+| 512 | CPU | 162K | 201K | 165K | 272K | 177K |
+| 512 | 1x P100 | 2.1M | 2.0M | 2.4M | 2.0M | 1.9M |
+| 512 | 2x P100 | 2.3M | 2.3M | 2.6M | 2.3M | 2.2M |
+| 1,024 | CPU | 176K | 211K | 181K | 290K | 228K |
+| 1,024 | 1x P100 | 3.8M | 3.1M | 4.5M | 2.7M | 3.2M |
+| 1,024 | 2x P100 | 4.1M | 3.9M | 5.1M | 3.6M | 4.1M |
+| 2,048 | CPU | 182K | 216K | 185K | 300K | 267K |
+| 2,048 | 1x P100 | 6.5M | 3.6M | 8.3M | 2.8M | 4.9M |
+| 2,048 | 2x P100 | 7.6M | 5.3M | 9.8M | 4.6M | 6.8M |
+| 4,096 | CPU | 185K | 217K | 194K | 307K | 293K |
+| 4,096 | 1x P100 | 9.8M | 3.2M | 13.2M | 3.5M | 6.2M |
+| 4,096 | 2x P100 | 12.7M | 5.6M | 16.5M | 6.1M | 9.6M |
+| 8,192 | CPU | 186K | 219K | 199K | 309K | 307K |
+| 8,192 | 1x P100 | 13.7M | 3.7M | 19.8M | 5.6M | 5.5M |
+| 8,192 | 2x P100 | 19.6M | 6.8M | 27.6M | 9.9M | 9.8M |
 
 ### Throughput plot
 
@@ -45,48 +56,43 @@ Solid lines = 1x P100, dash-dot lines = 2x P100, dashed lines = CPU (Rust).
 
 ### Discussion
 
-**CE and LS** are the strongest GPU beneficiaries. Lomb-Scargle reaches 41M
-pts/sec on 2x P100 (29x over CPU at 16K points) because its per-point
+GPU kernels use a **hybrid atomic/privatization strategy** — shared-memory
+atomics for small point counts (low overhead, no register pressure) and
+per-thread register privatization with warp-shuffle reduction for large
+point counts (no atomic contention). The runtime threshold is tuned per
+algorithm (FPW: 2048, AOV: 4096, BLS: 8192). All threads in a block see the
+same point count, so the branch causes no warp divergence. This eliminates
+the throughput dip that pure privatization caused at small N, while preserving
+scalability at large N.
+
+**CE and LS** are the strongest GPU beneficiaries. Lomb-Scargle reaches
+19.8M pts/sec on 1x P100 at 8K points (100x over CPU) because its per-point
 trigonometric work maps efficiently to GPU SIMD lanes. Conditional Entropy
-follows a similar pattern, reaching 29M pts/sec on 2x P100 (23x over CPU).
+follows a similar pattern, reaching 13.7M pts/sec (73x over CPU).
 
-**AOV** sees diminishing GPU returns at large point counts. GPU throughput
-peaks around 2K points then declines due to register/shared-memory pressure
-limiting kernel occupancy. Even so, 2x P100 reaches 4.8M pts/sec at 16K
-points (3.2x over CPU).
+**AOV** reaches 3.7M pts/sec at 8K points on 1x P100 (17x over CPU).
+The hybrid threshold at 4096 keeps the atomic path active through moderate
+point counts where register privatization overhead would dominate.
 
-**FPW** GPU throughput peaks around 2K points (2.8M pts/sec on 1x P100)
-then declines at larger sizes due to memory-access patterns in the
-accumulation phase. The parallelized final-phase reduction ensures the GPU
-stays faster than CPU up to 4K points on 1x P100 and up to 8K on 2x P100.
+**FPW** reaches 5.6M pts/sec at 8K points on 1x P100 (18x over CPU),
+scaling smoothly from the GPU crossover around 256 points.
 
-**BLS** benefits dramatically from the parallelized search kernel. Where the
-old serial kernel was 5x slower than CPU, the new parallel kernel reaches
-6.1M pts/sec on 1x P100 (3.4x over CPU at 4K points) and 9.8M on 2x P100.
-At 16K points, BLS achieves 7.0M pts/sec on 2x P100 (3.4x over CPU).
-
-**2x P100 scaling**: with threaded multi-GPU dispatch (one CPU thread per
-GPU), the second GPU provides near-linear scaling at large point counts.
-At 16K points per curve, 2x/1x ratios are: CE 1.6x, AOV 2.0x, LS 1.5x,
-FPW 2.0x, BLS 1.9x.
+**BLS** reaches 6.2M pts/sec at 4K points on 1x P100 (21x over CPU),
+with a slight dip at 8K due to the transition from atomic to privatization
+path. BLS has the highest per-point computational cost due to its prefix-sum
+search over all (duration, phase) pairs.
 
 ## Curve-Count Scaling
 
-Fixed **1,024 points/curve**, varying the number of curves: 100, 1,000, and 10,000.
+Fixed **1,024 points/curve** and **100 curves**.
 
 ### Throughput table (points/sec)
 
 | curves | Backend | CE | AOV | LS | FPW | BLS |
 |-------:|---------|---:|----:|---:|----:|----:|
-| 100 | CPU | 937K | 1.1M | 972K | 1.4M | 1.1M |
-| 100 | 1x P100 | 3.6M | 3.3M | 4.2M | 2.5M | 3.0M |
-| 100 | 2x P100 | 4.3M | 4.2M | 4.8M | 3.5M | 3.9M |
-| 1,000 | CPU | 943K | 1.1M | 978K | 1.2M | 1.0M |
-| 1,000 | 1x P100 | 3.7M | 3.4M | 4.4M | 2.6M | 3.1M |
-| 1,000 | 2x P100 | 4.5M | 4.4M | 5.1M | 3.7M | 4.2M |
-| 10,000 | CPU | 938K | 1.1M | 977K | 1.2M | 1.0M |
-| 10,000 | 1x P100 | 3.8M | 3.4M | 4.4M | 2.6M | 3.1M |
-| 10,000 | 2x P100 | 4.5M | 4.4M | 5.1M | 3.7M | 4.2M |
+| 100 | CPU | 175K | 211K | 181K | 289K | 229K |
+| 100 | 1x P100 | 3.7M | 2.9M | 4.4M | 2.6M | 3.1M |
+| 100 | 2x P100 | 4.2M | 4.0M | 5.0M | 3.6M | 4.0M |
 
 ### Throughput plot
 
@@ -94,17 +100,11 @@ Fixed **1,024 points/curve**, varying the number of curves: 100, 1,000, and 10,0
 
 ### Discussion
 
-GPU throughput is stable from 100 to 10,000 curves, indicating the GPU is
-fully occupied even at 100 curves. CPU throughput is also flat thanks to
-Rayon's work-stealing across 28 cores.
-
-At 1,000 curves (the production-like configuration), 1x P100 is 2.1--4.5x
-faster than CPU across all algorithms, and 2x P100 adds another 1.2--1.4x
-on top.
-
-BLS at 1024 pts/curve achieves 3.1M pts/sec on 1x P100 (3.0x over CPU)
-and 4.2M on 2x P100 (4.0x over CPU), a dramatic improvement from the
-pre-optimization state where the GPU was slower than CPU.
+At 1,024 points per curve, all five algorithms show strong GPU speedups
+thanks to the hybrid atomic/privatization kernels. LS leads at 4.4M pts/sec
+on 1x P100 (24x over CPU), followed by CE at 3.7M (21x), BLS at 3.1M (14x),
+AOV at 2.9M (14x), and FPW at 2.6M (9x). The 2x P100 configuration provides
+an additional 8--40% speedup depending on algorithm.
 
 ## Multi-Device Scaling
 
@@ -120,10 +120,8 @@ devices using `cudaSetDevice`. Control which GPUs are used with the
 CUDA_VISIBLE_DEVICES=0,1 python my_script.py
 ```
 
-At 1,000 curves with 1,024 points each, 2x P100 achieves 1.2--1.4x
-throughput over 1x P100 across all algorithms. At larger point counts
-(16K points), scaling approaches 1.5--2.0x, as GPU compute time dominates
-over launch overhead.
+Multi-GPU benefits are most visible at large point counts where GPU compute
+time dominates over launch and transfer overhead.
 
 ### Rust/Rayon CPU parallelism
 

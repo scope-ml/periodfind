@@ -40,7 +40,16 @@ __host__ __device__ size_t AOV::PhaseBin(float phase_val) const {
 // CUDA Kernels
 //
 
-extern __shared__ uint32_t shared_bytes[];
+// Compile-time max for per-thread register bin arrays
+#define AOV_MAX_BINS 64
+
+// Tile size for shared-memory light curve tiling (atomic path)
+#define AOV_TILE_SIZE 256
+
+// Hybrid threshold: use atomics for small point counts, privatization for large
+#define AOV_HYBRID_THRESHOLD 4096
+
+extern __shared__ float aov_sh_data[];
 
 __global__ void FoldBinKernel(const float* __restrict__ times,
                               const float* __restrict__ mags,
@@ -49,18 +58,7 @@ __global__ void FoldBinKernel(const float* __restrict__ times,
                               const float* __restrict__ period_dts,
                               const AOV aov,
                               AOVData* __restrict__ data) {
-    uint32_t* sh_count = &shared_bytes[0];
-    float* sh_sums = (float*)&shared_bytes[aov.NumPhaseBins()];
-    float* sh_sq_sums = (float*)&shared_bytes[2 * aov.NumPhaseBins()];
-
-    for (size_t idx = threadIdx.x; idx < aov.NumPhaseBins();
-         idx += blockDim.x) {
-        sh_count[idx] = 0;
-        sh_sums[idx] = 0;
-        sh_sq_sums[idx] = 0;
-    }
-
-    __syncthreads();
+    const size_t n_bins = aov.NumPhaseBins();
 
     // Period and period time derivative for this block.
     const float period = periods[blockIdx.x];
@@ -69,35 +67,149 @@ __global__ void FoldBinKernel(const float* __restrict__ times,
     // Time derivative correction factor.
     const float pdt_corr = (period_dt / period) / 2;
 
-    float i_part;  // Only used for modff.
-
-    // Compute the histogram statistics.
-    for (size_t idx = threadIdx.x; idx < length; idx += blockDim.x) {
-        float t = times[idx];
-        float t_corr = t - pdt_corr * t * t;
-        float folded = fabsf(modff(t_corr / period, &i_part));
-
-        float mag = mags[idx];
-
-        size_t bin = aov.PhaseBin(folded);
-
-        for (size_t i = 0; i < aov.NumPhaseBinOverlap(); i++) {
-            size_t idx = (bin + i) % aov.NumPhaseBins();
-
-            atomicAdd(&sh_count[idx], 1);
-            atomicAdd(&sh_sums[idx], mag);
-            atomicAdd(&sh_sq_sums[idx], mag * mag);
-        }
-    }
-
-    __syncthreads();
-
+    // Output location for this block
     size_t block_id = blockIdx.x * gridDim.y + blockIdx.y;
 
-    for (size_t idx = threadIdx.x; idx < aov.NumPhaseBins();
-         idx += blockDim.x) {
-        data[block_id * aov.NumPhaseBins() + idx] = {
-            sh_count[idx], sh_sums[idx], sh_sq_sums[idx]};
+    if (length <= AOV_HYBRID_THRESHOLD) {
+        // === Atomic path: shared memory bins, no register pressure ===
+        float* sh_times = &aov_sh_data[0];
+        float* sh_mags = &aov_sh_data[AOV_TILE_SIZE];
+        uint32_t* sh_count = (uint32_t*)&aov_sh_data[2 * AOV_TILE_SIZE];
+        float* sh_sums = &aov_sh_data[2 * AOV_TILE_SIZE + n_bins];
+        float* sh_sq_sums = &aov_sh_data[2 * AOV_TILE_SIZE + 2 * n_bins];
+
+        // Cooperatively zero bins
+        for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
+            sh_count[k] = 0;
+            sh_sums[k] = 0.0f;
+            sh_sq_sums[k] = 0.0f;
+        }
+        __syncthreads();
+
+        float i_part;
+
+        // Process the light curve in tiles
+        for (size_t tile_start = 0; tile_start < length;
+             tile_start += AOV_TILE_SIZE) {
+            size_t tile_end = tile_start + AOV_TILE_SIZE;
+            if (tile_end > length)
+                tile_end = length;
+            size_t tile_len = tile_end - tile_start;
+
+            // Cooperatively load tile into shared memory
+            for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                sh_times[i] = times[tile_start + i];
+                sh_mags[i] = mags[tile_start + i];
+            }
+            __syncthreads();
+
+            // Accumulate into shared bins via atomicAdd
+            for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                float t = sh_times[i];
+                float t_corr = t - pdt_corr * t * t;
+                float folded = fabsf(modff(t_corr / period, &i_part));
+
+                float mag = sh_mags[i];
+                float mag_sq = mag * mag;
+
+                size_t bin = aov.PhaseBin(folded);
+
+                for (size_t j = 0; j < aov.NumPhaseBinOverlap(); j++) {
+                    size_t bin_idx = (bin + j) % n_bins;
+
+                    atomicAdd(&sh_count[bin_idx], 1u);
+                    atomicAdd(&sh_sums[bin_idx], mag);
+                    atomicAdd(&sh_sq_sums[bin_idx], mag_sq);
+                }
+            }
+            __syncthreads();
+        }
+
+        // Cooperatively write bin totals to global memory
+        for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
+            data[block_id * n_bins + k] = {sh_count[k], sh_sums[k],
+                                           sh_sq_sums[k]};
+        }
+    } else {
+        // === Privatization path: per-thread register arrays ===
+
+        uint32_t my_count[AOV_MAX_BINS];
+        float my_sums[AOV_MAX_BINS];
+        float my_sq_sums[AOV_MAX_BINS];
+        for (size_t k = 0; k < n_bins; k++) {
+            my_count[k] = 0;
+            my_sums[k] = 0.0f;
+            my_sq_sums[k] = 0.0f;
+        }
+
+        float i_part;
+
+        // Compute the histogram statistics into private arrays.
+        for (size_t idx = threadIdx.x; idx < length; idx += blockDim.x) {
+            float t = times[idx];
+            float t_corr = t - pdt_corr * t * t;
+            float folded = fabsf(modff(t_corr / period, &i_part));
+
+            float mag = mags[idx];
+
+            size_t bin = aov.PhaseBin(folded);
+
+            for (size_t i = 0; i < aov.NumPhaseBinOverlap(); i++) {
+                size_t bin_idx = (bin + i) % n_bins;
+
+                my_count[bin_idx]++;
+                my_sums[bin_idx] += mag;
+                my_sq_sums[bin_idx] += mag * mag;
+            }
+        }
+
+        // --- Reduce private bins across all threads ---
+
+        const unsigned int FULL_MASK = 0xFFFFFFFF;
+        const int NUM_WARPS = blockDim.x / 32;
+        int warp_id = threadIdx.x / 32;
+        int lane_id = threadIdx.x % 32;
+
+        // Step 1: Warp-shuffle reduce each bin within each warp
+        for (size_t k = 0; k < n_bins; k++) {
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                my_count[k] +=
+                    __shfl_down_sync(FULL_MASK, my_count[k], offset);
+                my_sums[k] +=
+                    __shfl_down_sync(FULL_MASK, my_sums[k], offset);
+                my_sq_sums[k] +=
+                    __shfl_down_sync(FULL_MASK, my_sq_sums[k], offset);
+            }
+        }
+
+        // Step 2: Warp leaders write partial sums to shared memory
+        // Layout: 3 arrays of NUM_WARPS * n_bins values
+        uint32_t* sh_reduce_count = (uint32_t*)&aov_sh_data[0];
+        float* sh_reduce_sums = &aov_sh_data[NUM_WARPS * n_bins];
+        float* sh_reduce_sq_sums = &aov_sh_data[2 * NUM_WARPS * n_bins];
+
+        if (lane_id == 0) {
+            for (size_t k = 0; k < n_bins; k++) {
+                sh_reduce_count[warp_id * n_bins + k] = my_count[k];
+                sh_reduce_sums[warp_id * n_bins + k] = my_sums[k];
+                sh_reduce_sq_sums[warp_id * n_bins + k] = my_sq_sums[k];
+            }
+        }
+        __syncthreads();
+
+        // Step 3: Cooperatively sum across warps and write to global memory
+        for (size_t k = threadIdx.x; k < n_bins; k += blockDim.x) {
+            uint32_t total_count = 0;
+            float total_sums = 0.0f;
+            float total_sq_sums = 0.0f;
+            for (int w = 0; w < NUM_WARPS; w++) {
+                total_count += sh_reduce_count[w * n_bins + k];
+                total_sums += sh_reduce_sums[w * n_bins + k];
+                total_sq_sums += sh_reduce_sq_sums[w * n_bins + k];
+            }
+            data[block_id * n_bins + k] = {total_count, total_sums,
+                                           total_sq_sums};
+        }
     }
 }
 
@@ -167,8 +279,15 @@ AOVData* AOV::DeviceFoldAndBin(const float* times,
     gpuErrchk(cudaMalloc(&dev_hists, bytes));
 
     // Number of threads and corresponding shared memory usage
+    // Atomic path needs 2*TILE_SIZE + 3*n_bins (simultaneous),
+    // privatization needs 3*NUM_WARPS*n_bins (sequential reduction).
+    // Take the max for both paths.
     const size_t num_threads = 256;
-    const size_t shared_bytes = NumPhaseBins() * sizeof(AOVData);
+    const size_t atomic_floats = 2 * AOV_TILE_SIZE + 3 * NumPhaseBins();
+    const size_t reduce_floats = 3 * (num_threads / 32) * NumPhaseBins();
+    const size_t shared_bytes =
+        (atomic_floats > reduce_floats ? atomic_floats : reduce_floats)
+        * sizeof(float);
 
     // Grid to search over periods and time derivatives
     const dim3 grid_dim = dim3(num_periods, num_p_dts);
@@ -334,8 +453,14 @@ void AOV::CalcAOVValsBatched(const std::vector<float*>& times,
     }
 
     // Kernel launch information for the fold & bin step
+    // Atomic path needs 2*TILE_SIZE + 3*n_bins (simultaneous),
+    // privatization needs 3*NUM_WARPS*n_bins (sequential reduction).
     const size_t num_threads_fb = 256;
-    const size_t shared_bytes_fb = NumPhaseBins() * sizeof(AOVData);
+    const size_t atomic_floats = 2 * AOV_TILE_SIZE + 3 * NumPhaseBins();
+    const size_t reduce_floats = 3 * (num_threads_fb / 32) * NumPhaseBins();
+    const size_t shared_bytes_fb =
+        (atomic_floats > reduce_floats ? atomic_floats : reduce_floats)
+        * sizeof(float);
     const dim3 grid_dim_fb = dim3(num_periods, num_p_dts);
 
     // Kernel launch information for the AOV calculation step
