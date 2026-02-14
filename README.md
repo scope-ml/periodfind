@@ -99,7 +99,7 @@ features = fd.calc(times, mags, errs, periods)
 
 ## Throughput Benchmarks
 
-Measured on a batch of **100 light curves** over **1,000 trial periods** (single `period_dt`). CPU = Rust/Rayon (28 cores, Skylake Xeon); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
+Measured on a batch of **100 light curves** over **1000 trial periods** (single `period_dt`). CPU = Rust/Rayon (28 cores, Skylake Xeon); GPU = NVIDIA Tesla P100 (12 GB). Times are median of 3 runs after warmup.
 
 ### Throughput table (points/sec)
 
@@ -108,15 +108,15 @@ Measured on a batch of **100 light curves** over **1,000 trial periods** (single
 | 256 | CPU | 140K | 184K | 146K | 245K | 121K |
 | 256 | 1x P100 | 1.1M | 1.1M | 1.2M | 1.1M | 1.0M |
 | 256 | 2x P100 | 1.1M | 1.2M | 1.4M | 1.2M | 1.2M |
-| 1,024 | CPU | 176K | 211K | 181K | 290K | 228K |
-| 1,024 | 1x P100 | 3.8M | 3.1M | 4.5M | 2.7M | 3.2M |
-| 1,024 | 2x P100 | 4.1M | 3.9M | 5.1M | 3.6M | 4.1M |
-| 4,096 | CPU | 185K | 217K | 194K | 307K | 293K |
-| 4,096 | 1x P100 | 9.8M | 3.2M | 13.2M | 3.5M | 6.2M |
-| 4,096 | 2x P100 | 12.7M | 5.6M | 16.5M | 6.1M | 9.6M |
-| 8,192 | CPU | 186K | 219K | 199K | 309K | 307K |
-| 8,192 | 1x P100 | 13.7M | 3.7M | 19.8M | 5.6M | 5.5M |
-| 8,192 | 2x P100 | 19.6M | 6.8M | 27.6M | 9.9M | 9.8M |
+| 1024 | CPU | 176K | 211K | 181K | 290K | 228K |
+| 1024 | 1x P100 | 3.8M | 3.1M | 4.5M | 2.7M | 3.2M |
+| 1024 | 2x P100 | 4.1M | 3.9M | 5.1M | 3.6M | 4.1M |
+| 4096 | CPU | 185K | 217K | 194K | 307K | 293K |
+| 4096 | 1x P100 | 9.8M | 3.2M | 13.2M | 3.5M | 6.2M |
+| 4096 | 2x P100 | 12.7M | 5.6M | 16.5M | 6.1M | 9.6M |
+| 8192 | CPU | 186K | 219K | 199K | 309K | 307K |
+| 8192 | 1x P100 | 13.7M | 3.7M | 19.8M | 5.6M | 5.5M |
+| 8192 | 2x P100 | 19.6M | 6.8M | 27.6M | 9.9M | 9.8M |
 
 GPU kernels use a **hybrid atomic/privatization strategy** — shared-memory atomics for small point counts (low overhead, no register pressure) and per-thread register privatization with warp-shuffle reduction for large point counts (no atomic contention). This eliminates the throughput dip that pure privatization caused at small N, while preserving scalability at large N.
 
@@ -126,7 +126,7 @@ GPU kernels use a **hybrid atomic/privatization strategy** — shared-memory ato
 
 Solid lines = 1x P100, dash-dot = 2x P100, dashed lines = CPU (Rust). All algorithms benefit from the GPU across the full range of point counts. LS reaches 20M pts/sec on 1x P100 at 8K points (100x over CPU). BLS reaches 5.5M pts/sec on 1x P100 (18x over CPU).
 
-See the [full benchmarks page](https://zwickytransientfacility.github.io/periodfind/benchmarks/) for curve-scaling results, 2x P100 data, and methodology.
+See the [full benchmarks page](https://zwickytransientfacility.github.io/periodfind/benchmarks/) for the full table, 2x P100 data, and methodology.
 
 To reproduce, run `python benchmarks/throughput_bench.py` followed by `python benchmarks/plot_throughput.py`. Use `sbatch benchmarks/run_bench.sh` for multi-GPU benchmarks on a SLURM cluster.
 

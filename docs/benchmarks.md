@@ -8,7 +8,7 @@ All benchmarks use synthetic sinusoidal light curves with Gaussian noise
 - **Batch size**: 100 light curves
 - **CPU**: Rust/Rayon on 28-core Skylake Xeon
 - **GPU**: 1x or 2x NVIDIA Tesla P100 (12 GB each)
-- **Trial periods**: 1,000 linearly spaced between 0.5 and 10.0 (single `period_dt`)
+- **Trial periods**: 1000 linearly spaced between 0.5 and 10.0 (single `period_dt`)
 - **Timing**: median of 3 runs after 1 warmup iteration
 - **Metric**: throughput in total points processed per second (`n_curves * n_points / wall_sec`)
 
@@ -17,7 +17,7 @@ node to ensure a fair comparison.
 
 ## Point-Count Scaling
 
-Fixed **100 curves**, varying points per curve from 64 to 8,192.
+Fixed **100 curves**, varying points per curve from 64 to 8192.
 
 ### Throughput table (points/sec)
 
@@ -35,18 +35,18 @@ Fixed **100 curves**, varying points per curve from 64 to 8,192.
 | 512 | CPU | 162K | 201K | 165K | 272K | 177K |
 | 512 | 1x P100 | 2.1M | 2.0M | 2.4M | 2.0M | 1.9M |
 | 512 | 2x P100 | 2.3M | 2.3M | 2.6M | 2.3M | 2.2M |
-| 1,024 | CPU | 176K | 211K | 181K | 290K | 228K |
-| 1,024 | 1x P100 | 3.8M | 3.1M | 4.5M | 2.7M | 3.2M |
-| 1,024 | 2x P100 | 4.1M | 3.9M | 5.1M | 3.6M | 4.1M |
-| 2,048 | CPU | 182K | 216K | 185K | 300K | 267K |
-| 2,048 | 1x P100 | 6.5M | 3.6M | 8.3M | 2.8M | 4.9M |
-| 2,048 | 2x P100 | 7.6M | 5.3M | 9.8M | 4.6M | 6.8M |
-| 4,096 | CPU | 185K | 217K | 194K | 307K | 293K |
-| 4,096 | 1x P100 | 9.8M | 3.2M | 13.2M | 3.5M | 6.2M |
-| 4,096 | 2x P100 | 12.7M | 5.6M | 16.5M | 6.1M | 9.6M |
-| 8,192 | CPU | 186K | 219K | 199K | 309K | 307K |
-| 8,192 | 1x P100 | 13.7M | 3.7M | 19.8M | 5.6M | 5.5M |
-| 8,192 | 2x P100 | 19.6M | 6.8M | 27.6M | 9.9M | 9.8M |
+| 1024 | CPU | 176K | 211K | 181K | 290K | 228K |
+| 1024 | 1x P100 | 3.8M | 3.1M | 4.5M | 2.7M | 3.2M |
+| 1024 | 2x P100 | 4.1M | 3.9M | 5.1M | 3.6M | 4.1M |
+| 2048 | CPU | 182K | 216K | 185K | 300K | 267K |
+| 2048 | 1x P100 | 6.5M | 3.6M | 8.3M | 2.8M | 4.9M |
+| 2048 | 2x P100 | 7.6M | 5.3M | 9.8M | 4.6M | 6.8M |
+| 4096 | CPU | 185K | 217K | 194K | 307K | 293K |
+| 4096 | 1x P100 | 9.8M | 3.2M | 13.2M | 3.5M | 6.2M |
+| 4096 | 2x P100 | 12.7M | 5.6M | 16.5M | 6.1M | 9.6M |
+| 8192 | CPU | 186K | 219K | 199K | 309K | 307K |
+| 8192 | 1x P100 | 13.7M | 3.7M | 19.8M | 5.6M | 5.5M |
+| 8192 | 2x P100 | 19.6M | 6.8M | 27.6M | 9.9M | 9.8M |
 
 ### Throughput plot
 
@@ -81,30 +81,6 @@ scaling smoothly from the GPU crossover around 256 points.
 with a slight dip at 8K due to the transition from atomic to privatization
 path. BLS has the highest per-point computational cost due to its prefix-sum
 search over all (duration, phase) pairs.
-
-## Curve-Count Scaling
-
-Fixed **1,024 points/curve** and **100 curves**.
-
-### Throughput table (points/sec)
-
-| curves | Backend | CE | AOV | LS | FPW | BLS |
-|-------:|---------|---:|----:|---:|----:|----:|
-| 100 | CPU | 175K | 211K | 181K | 289K | 229K |
-| 100 | 1x P100 | 3.7M | 2.9M | 4.4M | 2.6M | 3.1M |
-| 100 | 2x P100 | 4.2M | 4.0M | 5.0M | 3.6M | 4.0M |
-
-### Throughput plot
-
-![Curve-count scaling](throughput_curves.png)
-
-### Discussion
-
-At 1,024 points per curve, all five algorithms show strong GPU speedups
-thanks to the hybrid atomic/privatization kernels. LS leads at 4.4M pts/sec
-on 1x P100 (24x over CPU), followed by CE at 3.7M (21x), BLS at 3.1M (14x),
-AOV at 2.9M (14x), and FPW at 2.6M (9x). The 2x P100 configuration provides
-an additional 8--40% speedup depending on algorithm.
 
 ## Multi-Device Scaling
 
@@ -142,7 +118,7 @@ Run the benchmark suite and generate plots:
 # Run both point-scaling and curve-scaling sweeps (single GPU)
 python benchmarks/throughput_bench.py
 
-# Generate docs/throughput_points.png and docs/throughput_curves.png
+# Generate docs/throughput_points.png
 python benchmarks/plot_throughput.py
 
 # Multi-GPU benchmarks on a SLURM cluster with 2x P100

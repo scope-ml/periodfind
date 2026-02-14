@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Generate log-log throughput plots from benchmark results.
+"""Generate log-log throughput plot from benchmark results.
 
-Produces two plots:
+Produces:
   - docs/throughput_points.png  (point-count scaling sweep)
-  - docs/throughput_curves.png  (curve-count scaling sweep)
 """
 
 import csv
@@ -164,21 +163,6 @@ def main():
             output_path=os.path.join(DOCS_DIR, "throughput_points.png"),
         )
 
-    if "curves" in data:
-        all_curves = sorted(set(
-            x for b in data["curves"].values()
-            for a in b.values()
-            for x in a["x_vals"]
-        ))
-        plot_sweep(
-            data["curves"],
-            xlabel="Number of curves",
-            title=(
-                f"Periodfind throughput — {all_curves[0]}–{all_curves[-1]} curves, "
-                f"1024 pts/curve × 1000 periods"
-            ),
-            output_path=os.path.join(DOCS_DIR, "throughput_curves.png"),
-        )
 
 
 if __name__ == "__main__":
