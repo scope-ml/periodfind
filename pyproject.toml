@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=42", "wheel", "cython", "numpy"]
+requires = ["setuptools>=42,<76", "wheel", "cython", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "periodfind"
-version = "0.1.1"
+version = "0.1.3"
 description = "GPU-accelerated period finding utilities"
 readme = "README.md"
 license = {text = "BSD-3-Clause"}
@@ -30,6 +30,9 @@ dependencies = [
     "numpy",
     "periodfind_cpu>=0.1.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["periodfind*"]
 
 [project.urls]
 Homepage = "https://github.com/ZwickyTransientFacility/periodfind"

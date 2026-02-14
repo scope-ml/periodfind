@@ -211,39 +211,9 @@ else:
     extensions = []
     cmdclass = {}
 
-here = os.path.abspath(os.path.dirname(__file__))
-with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
-    long_description = f.read()
-
+# All metadata (name, version, description, dependencies, etc.) lives in
+# pyproject.toml.  setup.py only contributes CUDA extensions and cmdclass.
 setup(
-    name="periodfind",
-    version="0.1.1",
-    description="GPU-accelerated period finding utilities",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="https://github.com/ZwickyTransientFacility/periodfind",
-    author="Ethan Jaszewski, Michael Coughlin",
-    author_email="ethanjaszewski@yahoo.com, cough052@umn.edu",
-    classifiers=[
-        "License :: OSI Approved :: BSD License",
-        "Operating System :: POSIX :: Linux",
-        "Programming Language :: C++",
-        "Programming Language :: Cython",
-        "Programming Language :: Python :: 3",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering",
-        "Topic :: Scientific/Engineering :: Astronomy",
-        "Topic :: Software Development :: Libraries :: Python Modules",
-        "Environment :: GPU :: NVIDIA CUDA",
-    ],
-    python_requires=">=3.8",
-    install_requires=[
-        "numpy",
-        "periodfind_cpu>=0.1.0",
-    ],
-    keywords=["astronomy"],
-    packages=["periodfind", "periodfind.cpu", "periodfind.gpu"],
     ext_modules=extensions,
     cmdclass=cmdclass,
-    zip_safe=False,
 )
