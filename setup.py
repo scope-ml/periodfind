@@ -211,10 +211,16 @@ else:
     extensions = []
     cmdclass = {}
 
+here = os.path.abspath(os.path.dirname(__file__))
+with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
+    long_description = f.read()
+
 setup(
     name="periodfind",
-    version="0.1.0",
+    version="0.1.1",
     description="GPU-accelerated period finding utilities",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     url="https://github.com/ZwickyTransientFacility/periodfind",
     author="Ethan Jaszewski, Michael Coughlin",
     author_email="ethanjaszewski@yahoo.com, cough052@umn.edu",
