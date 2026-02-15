@@ -9,5 +9,8 @@ from periodfind.bls import BoxLeastSquares
 from periodfind.ce import ConditionalEntropy
 from periodfind.fpw import FPW
 from periodfind.ls import LombScargle
+from periodfind.mf import MatchedFilter
+from periodfind.mhf import MultiHarmonicFourier
+from periodfind.vn import ViterbiNarrowband
 
-__all__ = ["ConditionalEntropy", "AOV", "LombScargle", "FPW", "BoxLeastSquares"]
+__all__ = ["ConditionalEntropy", "AOV", "LombScargle", "FPW", "BoxLeastSquares", "MatchedFilter", "MultiHarmonicFourier", "ViterbiNarrowband"]

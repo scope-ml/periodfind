@@ -20,7 +20,7 @@ pub const NUM_FEATURES: usize = 14; // 2 (power, BIC) + 2 (offset, slope) + 2*MA
 /// `a` is the lower triangle of the matrix stored row-major in a flat array
 /// of length `n*n`.  `b` has length `n`.  On success, `b` contains the
 /// solution.  Returns `false` if the matrix is not positive-definite.
-fn cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
+pub(crate) fn cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
     // Cholesky factorisation: A = L L^T  (in-place, lower triangle)
     for i in 0..n {
         for j in 0..=i {

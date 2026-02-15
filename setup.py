@@ -205,6 +205,45 @@ if CUDA is not None and HAS_CYTHON:
                 "nvcc": nvcc_flags,
             },
         ),
+        Extension(
+            "periodfind.mf",
+            sources=["periodfind/cuda/mf.cu", "periodfind/mf.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+        Extension(
+            "periodfind.vn",
+            sources=["periodfind/cuda/vn.cu", "periodfind/vn.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
+        Extension(
+            "periodfind.mhf",
+            sources=["periodfind/cuda/mhf.cu", "periodfind/mhf.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
     ]
     cmdclass = {"build_ext": custom_build_ext}
 else:

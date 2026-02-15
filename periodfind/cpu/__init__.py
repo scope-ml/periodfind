@@ -16,6 +16,14 @@ from periodfind_cpu import (
     calc_fpw_peaks_batched,
     calc_ls_batched,
     calc_ls_peaks_batched,
+    calc_mf_batched,
+    calc_mf_features_batched,
+    calc_mf_peaks_batched,
+    calc_mhf_batched,
+    calc_mhf_peaks_batched,
+    calc_mhf_per_k_batched,
+    calc_vn_batched,
+    calc_vn_peaks_batched,
     compute_dmdt_batched,
     find_top_peaks_batched,  # noqa: F401  (public API)
     remove_high_cadence_batched,
@@ -657,6 +665,526 @@ class BoxLeastSquares:
             return all_stats
         elif output == "periodogram":
             return [Periodogram(data, [periods, period_dts], True) for data in bls_ndarr]
+        else:
+            raise NotImplementedError(
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
+            )
+
+
+class MatchedFilter:
+    """Matched Filter morphology scoring (CPU backend).
+
+    Phase-folds light curves, bins into a profile, and correlates against
+    template shapes (sawtooth, sinusoidal, eclipsing) via circular
+    cross-correlation.  The combined score (max_corr * R^2 * coverage)
+    serves as the periodogram statistic.
+
+    Parameters
+    ----------
+    num_bins : int, default=20
+        The number of phase bins for the folded profile.
+    """
+
+    MF_FEATURE_NAMES = [
+        "best_sawtooth",
+        "best_sinusoidal",
+        "best_eclipsing",
+        "R2",
+        "amp_snr",
+        "n_filled",
+        "combined",
+    ]
+
+    def __init__(self, num_bins=20):
+        self.num_bins = num_bins
+
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        errs=None,
+        output="stats",
+        normalize=False,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
+    ):
+        """Runs Matched Filter periodogram on a list of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray
+            List of light curve times.
+        mags : list of ndarray
+            List of light curve magnitudes.
+        periods : ndarray
+            Array of trial periods (float32).
+        period_dts : ndarray
+            Array of trial period time derivatives (float32).
+        errs : list of ndarray or None, default=None
+            List of per-point uncertainties.
+            If None, uniform uncertainties of 1.0 are assumed.
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
+            Type of output to return.
+        normalize : bool, default=False
+            Unused (accepted for API consistency).
+        center : bool, default=False
+            Unused (accepted for API consistency).
+        n_stats : int, default=1
+            Number of top Statistics to return.
+        significance_type : {'stdmean', 'madmedian'}, default='stdmean'
+            Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
+
+        Returns
+        -------
+        list of Statistics, list of Periodogram, or list of list of Statistics
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+
+        if errs is None:
+            errs = [np.ones(len(t), dtype=np.float32) for t in times]
+        else:
+            ensure_float32(errs, "errs")
+            if len(errs) != len(times):
+                raise ValueError(
+                    f"errs must have the same number of arrays as times, "
+                    f"got {len(errs)} and {len(times)}"
+                )
+            for i, (e, t) in enumerate(zip(errs, times)):
+                if len(e) != len(t):
+                    raise ValueError(
+                        f"errs[{i}] and times[{i}] have different lengths: "
+                        f"{len(e)} vs {len(t)}"
+                    )
+
+        if output == "peaks":
+            idx, val = calc_mf_peaks_batched(
+                times,
+                mags,
+                errs,
+                periods,
+                period_dts,
+                self.num_bins,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
+
+        mf_ndarr = calc_mf_batched(
+            times,
+            mags,
+            errs,
+            periods,
+            period_dts,
+            self.num_bins,
+        )
+
+        if output == "stats":
+            all_stats = []
+            for i in range(len(times)):
+                stats = Statistics.statistics_from_data(
+                    mf_ndarr[i],
+                    [periods, period_dts],
+                    True,
+                    n=n_stats,
+                    significance_type=significance_type,
+                )
+                all_stats.append(stats)
+            return all_stats
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in mf_ndarr]
+        else:
+            raise NotImplementedError(
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
+            )
+
+    def calc_features(self, times, mags, errs, periods):
+        """Compute detailed MF features at given periods (one per curve).
+
+        Parameters
+        ----------
+        times : list of ndarray (float32)
+            List of light curve times.
+        mags : list of ndarray (float32)
+            List of light curve magnitudes.
+        errs : list of ndarray (float32)
+            List of per-point uncertainties.
+        periods : ndarray (float32)
+            Array of periods, one per curve.
+
+        Returns
+        -------
+        ndarray of shape (n_curves, 7)
+            Features: [best_sawtooth, best_sinusoidal, best_eclipsing,
+                       R², amp_snr, n_filled, combined]
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+        ensure_float32(errs, "errs")
+
+        if len(errs) != len(times):
+            raise ValueError(
+                f"errs must have the same number of arrays as times, "
+                f"got {len(errs)} and {len(times)}"
+            )
+
+        periods = np.asarray(periods, dtype=np.float32)
+        if periods.ndim != 1 or len(periods) != len(times):
+            raise ValueError(
+                f"periods must be a 1D array with one entry per curve, "
+                f"got shape {periods.shape} for {len(times)} curves"
+            )
+
+        return calc_mf_features_batched(times, mags, errs, periods, self.num_bins)
+
+
+class MultiHarmonicFourier:
+    """Multi-Harmonic Fourier periodogram (CPU backend).
+
+    Fits Fourier models with 0..max_harmonics terms at every trial period
+    and uses BIC model selection.  The score is ΔBIC = BIC_flat - BIC_best
+    (higher = more periodic).  Captures non-sinusoidal shapes (sawtooth,
+    eclipsing) that single-sinusoid Lomb-Scargle misses.
+
+    Parameters
+    ----------
+    max_harmonics : int, default=5
+        Maximum number of Fourier harmonics to try (1–5).
+    """
+
+    def __init__(self, max_harmonics=5):
+        if not 1 <= max_harmonics <= 5:
+            raise ValueError(
+                f"max_harmonics must be between 1 and 5, got {max_harmonics}"
+            )
+        self.max_harmonics = max_harmonics
+
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        errs=None,
+        output="stats",
+        normalize=False,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
+    ):
+        """Runs Multi-Harmonic Fourier periodogram on a list of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray
+            List of light curve times.
+        mags : list of ndarray
+            List of light curve magnitudes.
+        periods : ndarray
+            Array of trial periods (float32).
+        period_dts : ndarray
+            Array of trial period time derivatives (float32).
+        errs : list of ndarray or None, default=None
+            List of per-point uncertainties (standard deviations).
+            If None, uniform uncertainties of 1.0 are assumed.
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
+            Type of output to return.
+        normalize : bool, default=False
+            Unused (accepted for API consistency).
+        center : bool, default=False
+            Unused (accepted for API consistency).
+        n_stats : int, default=1
+            Number of top Statistics to return.
+        significance_type : {'stdmean', 'madmedian'}, default='stdmean'
+            Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
+
+        Returns
+        -------
+        list of Statistics, list of Periodogram, or list of list of Statistics
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+
+        if errs is None:
+            errs = [np.ones(len(t), dtype=np.float32) for t in times]
+        else:
+            ensure_float32(errs, "errs")
+            if len(errs) != len(times):
+                raise ValueError(
+                    f"errs must have the same number of arrays as times, "
+                    f"got {len(errs)} and {len(times)}"
+                )
+            for i, (e, t) in enumerate(zip(errs, times)):
+                if len(e) != len(t):
+                    raise ValueError(
+                        f"errs[{i}] and times[{i}] have different lengths: "
+                        f"{len(e)} vs {len(t)}"
+                    )
+
+        if output == "peaks":
+            idx, val = calc_mhf_peaks_batched(
+                times,
+                mags,
+                errs,
+                periods,
+                period_dts,
+                self.max_harmonics,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
+
+        mhf_ndarr = calc_mhf_batched(
+            times,
+            mags,
+            errs,
+            periods,
+            period_dts,
+            self.max_harmonics,
+        )
+
+        if output == "stats":
+            all_stats = []
+            for i in range(len(times)):
+                stats = Statistics.statistics_from_data(
+                    mhf_ndarr[i],
+                    [periods, period_dts],
+                    True,
+                    n=n_stats,
+                    significance_type=significance_type,
+                )
+                all_stats.append(stats)
+            return all_stats
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in mhf_ndarr]
+        else:
+            raise NotImplementedError(
+                f'Output type "{output}" is not implemented. '
+                f'Use "stats", "periodogram", or "peaks".'
+            )
+
+    def calc_per_k(self, times, mags, errs, periods, period_dts=None):
+        """Compute per-harmonic-level ΔBIC at given periods (one per curve).
+
+        Evaluates the MHF model at a single period per curve and returns
+        the ΔBIC for each harmonic level K=0..max_harmonics, plus the
+        BIC-optimal K.  This is useful for morphology discrimination:
+        ΔBIC(K=3) >> ΔBIC(K=1) indicates non-sinusoidal shapes.
+
+        Parameters
+        ----------
+        times : list of ndarray (float32)
+            List of light curve times.
+        mags : list of ndarray (float32)
+            List of light curve magnitudes.
+        errs : list of ndarray (float32)
+            List of per-point uncertainties.
+        periods : ndarray (float32)
+            Array of periods, one per curve.
+        period_dts : ndarray (float32) or None
+            Array of period time derivatives, one per curve.
+            If None, zeros are used.
+
+        Returns
+        -------
+        ndarray of shape (n_curves, max_harmonics + 2)
+            Each row: [ΔBIC_k0, ΔBIC_k1, ..., ΔBIC_kN, best_k]
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+        ensure_float32(errs, "errs")
+
+        if len(errs) != len(times):
+            raise ValueError(
+                f"errs must have the same number of arrays as times, "
+                f"got {len(errs)} and {len(times)}"
+            )
+        for i, (e, t) in enumerate(zip(errs, times)):
+            if len(e) != len(t):
+                raise ValueError(
+                    f"errs[{i}] and times[{i}] have different lengths: "
+                    f"{len(e)} vs {len(t)}"
+                )
+
+        periods = np.asarray(periods, dtype=np.float32)
+        if periods.ndim != 1 or len(periods) != len(times):
+            raise ValueError(
+                f"periods must be a 1D array with one entry per curve, "
+                f"got shape {periods.shape} for {len(times)} curves"
+            )
+
+        if period_dts is None:
+            period_dts = np.zeros(len(times), dtype=np.float32)
+        else:
+            period_dts = np.asarray(period_dts, dtype=np.float32)
+            if period_dts.ndim != 1 or len(period_dts) != len(times):
+                raise ValueError(
+                    f"period_dts must be a 1D array with one entry per curve, "
+                    f"got shape {period_dts.shape} for {len(times)} curves"
+                )
+
+        return calc_mhf_per_k_batched(
+            times, mags, errs, periods, period_dts, self.max_harmonics
+        )
+
+
+class ViterbiNarrowband:
+    """Viterbi Narrowband period-finding score (CPU backend).
+
+    Builds the same 2D phase-magnitude histogram as Conditional Entropy,
+    then runs a circular Viterbi algorithm to find the most likely narrow
+    path through phase-mag space.  The score is the fraction of histogram
+    mass concentrated within ``margin`` bins of the optimal path.
+
+    Parameters
+    ----------
+    n_phase : int, default=20
+        The number of phase bins in the histogram.
+    n_mag : int, default=20
+        The number of magnitude bins in the histogram.
+    phase_bin_extent : int, default=1
+        Effective width (in bins) of each phase bin (overlap/smoothing).
+    mag_bin_extent : int, default=1
+        Effective width (in bins) of each magnitude bin (overlap/smoothing).
+    bandwidth : int, default=2
+        Maximum magnitude-bin shift between adjacent phase bins.
+    margin : int, default=1
+        Number of bins around the Viterbi path counted for the
+        concentration ratio.
+    """
+
+    def __init__(
+        self,
+        n_phase=20,
+        n_mag=20,
+        phase_bin_extent=1,
+        mag_bin_extent=1,
+        bandwidth=2,
+        margin=1,
+    ):
+        self.n_phase = n_phase
+        self.n_mag = n_mag
+        self.phase_bin_extent = phase_bin_extent
+        self.mag_bin_extent = mag_bin_extent
+        self.bandwidth = bandwidth
+        self.margin = margin
+
+    def calc(
+        self,
+        times,
+        mags,
+        periods,
+        period_dts,
+        output="stats",
+        normalize=True,
+        center=False,
+        n_stats=1,
+        significance_type="stdmean",
+        n_peaks=N_PEAKS_DEFAULT,
+        min_distance=MIN_DISTANCE_DEFAULT,
+    ):
+        """Runs Viterbi Narrowband calculations on a list of light curves.
+
+        Parameters
+        ----------
+        times : list of ndarray
+            List of light curve times.
+        mags : list of ndarray
+            List of light curve magnitudes.
+        periods : ndarray
+            Array of trial periods (float32).
+        period_dts : ndarray
+            Array of trial period time derivatives (float32).
+        output : {'stats', 'periodogram', 'peaks'}, default='stats'
+            Type of output to return.
+        normalize : bool, default=True
+            Whether to normalize magnitudes to (0, 1).
+        center : bool, default=False
+            Whether to center magnitudes to zero mean.
+        n_stats : int, default=1
+            Number of top Statistics to return.
+        significance_type : {'stdmean', 'madmedian'}, default='stdmean'
+            Significance metric.
+        n_peaks : int, default=32
+            Number of peaks to keep per light curve (used when output='peaks').
+        min_distance : int, default=1
+            Minimum distance between accepted peaks.
+
+        Returns
+        -------
+        list of Statistics, list of Periodogram, or list of list of Statistics
+        """
+        validate_inputs(times, mags)
+        ensure_float32(times, "times")
+        ensure_float32(mags, "mags")
+
+        mags_use = prepare_magnitudes(mags, center, normalize)
+
+        if output == "peaks":
+            idx, val = calc_vn_peaks_batched(
+                times,
+                mags_use,
+                periods,
+                period_dts,
+                self.n_phase,
+                self.n_mag,
+                self.phase_bin_extent,
+                self.mag_bin_extent,
+                self.bandwidth,
+                self.margin,
+                n_peaks,
+                min_distance,
+            )
+            return _unravel_peaks(idx, val, periods, period_dts, n_peaks)
+
+        vn_ndarr = calc_vn_batched(
+            times,
+            mags_use,
+            periods,
+            period_dts,
+            self.n_phase,
+            self.n_mag,
+            self.phase_bin_extent,
+            self.mag_bin_extent,
+            self.bandwidth,
+            self.margin,
+        )
+
+        if output == "stats":
+            all_stats = []
+            for i in range(len(times)):
+                stats = Statistics.statistics_from_data(
+                    vn_ndarr[i],
+                    [periods, period_dts],
+                    True,
+                    n=n_stats,
+                    significance_type=significance_type,
+                )
+                all_stats.append(stats)
+            return all_stats
+        elif output == "periodogram":
+            return [Periodogram(data, [periods, period_dts], True) for data in vn_ndarr]
         else:
             raise NotImplementedError(
                 f'Output type "{output}" is not implemented. '

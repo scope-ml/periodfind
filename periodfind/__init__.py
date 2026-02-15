@@ -148,6 +148,48 @@ def BoxLeastSquares(**kwargs):
     return _Cls(**kwargs)
 
 
+def MatchedFilter(**kwargs):
+    """Create a Matched Filter morphology scorer on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        from periodfind.gpu import MatchedFilter as _Cls
+    else:
+        from periodfind.cpu import MatchedFilter as _Cls
+    return _Cls(**kwargs)
+
+
+def ViterbiNarrowband(**kwargs):
+    """Create a Viterbi Narrowband scorer on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        from periodfind.gpu import ViterbiNarrowband as _Cls
+    else:
+        from periodfind.cpu import ViterbiNarrowband as _Cls
+    return _Cls(**kwargs)
+
+
+def MultiHarmonicFourier(**kwargs):
+    """Create a Multi-Harmonic Fourier periodogram on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        from periodfind.gpu import MultiHarmonicFourier as _Cls
+    else:
+        from periodfind.cpu import MultiHarmonicFourier as _Cls
+    return _Cls(**kwargs)
+
+
 def FourierDecomposition(**kwargs):
     """Create a Fourier decomposition feature extractor.
 

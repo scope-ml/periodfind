@@ -16,7 +16,10 @@ mod fourier;
 mod fpw;
 mod highcadence;
 mod ls;
+mod mf;
+mod mhf;
 mod peaks;
+mod vn;
 
 // ===========================================================================
 // Full-periodogram functions (existing)
@@ -367,6 +370,129 @@ fn calc_fourier_batched<'py>(
 }
 
 // ===========================================================================
+// Viterbi Narrowband
+// ===========================================================================
+
+/// Compute batched Viterbi Narrowband periodograms.
+///
+/// Returns a 3D numpy array of shape (n_curves, n_periods, n_pdts).
+#[pyfunction]
+fn calc_vn_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_phase: usize,
+    num_mag: usize,
+    phase_overlap: usize,
+    mag_overlap: usize,
+    bandwidth: usize,
+    margin: usize,
+) -> PyResult<Py<PyArray3<f32>>> {
+    let periods_slice = periods.as_slice()?;
+    let period_dts_slice = period_dts.as_slice()?;
+    let n_curves = times_list.len();
+    let n_periods = periods_slice.len();
+    let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
+
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
+    }
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = vn::calc_vn(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    num_phase,
+                    num_mag,
+                    phase_overlap,
+                    mag_overlap,
+                    bandwidth,
+                    margin,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_vn_batched");
+    Ok(output.into_pyarray(py).into())
+}
+
+/// Fused VN + peak finding.  Returns (peak_indices, peak_values) each of
+/// shape (n_curves, n_peaks).
+#[pyfunction]
+fn calc_vn_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_phase: usize,
+    num_mag: usize,
+    phase_overlap: usize,
+    mag_overlap: usize,
+    bandwidth: usize,
+    margin: usize,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let flat = vn::calc_vn(
+            ts,
+            ms,
+            periods_s,
+            period_dts_s,
+            num_phase,
+            num_mag,
+            phase_overlap,
+            mag_overlap,
+            bandwidth,
+            margin,
+        );
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+// ===========================================================================
 // Peak-finding functions
 // ===========================================================================
 
@@ -628,6 +754,328 @@ fn calc_bls_peaks_batched<'py>(
 }
 
 // ===========================================================================
+// Matched Filter periodogram + features
+// ===========================================================================
+
+/// Compute batched Matched Filter periodograms.
+///
+/// Returns a 3D numpy array of shape (n_curves, n_periods, n_pdts).
+/// Each value is the combined score (max_corr × R² × coverage).
+#[pyfunction]
+fn calc_mf_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+) -> PyResult<Py<PyArray3<f32>>> {
+    let periods_slice = periods.as_slice()?;
+    let period_dts_slice = period_dts.as_slice()?;
+    let n_curves = times_list.len();
+    let n_periods = periods_slice.len();
+    let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
+
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
+    }
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = mf::calc_mf(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    errs_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    num_bins,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_mf_batched");
+    Ok(output.into_pyarray(py).into())
+}
+
+/// Fused MF + peak finding.
+#[pyfunction]
+fn calc_mf_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let es = errs_list[ci].as_slice()?;
+        let flat = mf::calc_mf(ts, ms, es, periods_s, period_dts_s, num_bins);
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+/// Compute batched Matched Filter feature extraction.
+///
+/// Returns a 2D numpy array of shape (n_curves, 7).
+/// Features: [best_sawtooth, best_sinusoidal, best_eclipsing, R², amp_snr, n_filled, combined]
+#[pyfunction]
+fn calc_mf_features_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    num_bins: usize,
+) -> PyResult<Py<PyArray2<f32>>> {
+    let periods_slice = periods.as_slice()?;
+    let n_curves = times_list.len();
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        mf::calc_mf_features_batch(&times_vecs, &mags_vecs, &errs_vecs, periods_slice, num_bins)
+    });
+
+    let n_feat = mf::NUM_MF_FEATURES;
+    let mut output = Array2::<f32>::zeros((n_curves, n_feat));
+    for i in 0..n_curves {
+        for j in 0..n_feat {
+            output[[i, j]] = flat[i * n_feat + j];
+        }
+    }
+
+    Ok(output.into_pyarray(py).into())
+}
+
+// ===========================================================================
+// Multi-Harmonic Fourier periodogram
+// ===========================================================================
+
+/// Compute batched Multi-Harmonic Fourier periodograms.
+///
+/// Returns a 3D numpy array of shape (n_curves, n_periods, n_pdts).
+/// Each value is ΔBIC = BIC_flat - BIC_best (higher = more periodic).
+#[pyfunction]
+fn calc_mhf_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    max_harmonics: usize,
+) -> PyResult<Py<PyArray3<f32>>> {
+    let periods_slice = periods.as_slice()?;
+    let period_dts_slice = period_dts.as_slice()?;
+    let n_curves = times_list.len();
+    let n_periods = periods_slice.len();
+    let n_pdts = period_dts_slice.len();
+    let per_curve = n_periods * n_pdts;
+
+    if per_curve == 0 {
+        let output = Array3::<f32>::zeros((n_curves, n_periods, n_pdts));
+        return Ok(output.into_pyarray(py).into());
+    }
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * per_curve];
+        output
+            .par_chunks_mut(per_curve)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = mhf::calc_mhf(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    errs_vecs[ci],
+                    periods_slice,
+                    period_dts_slice,
+                    max_harmonics,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array3::from_shape_vec((n_curves, n_periods, n_pdts), flat)
+        .expect("shape mismatch in calc_mhf_batched");
+    Ok(output.into_pyarray(py).into())
+}
+
+/// Compute per-K MHF ΔBIC at a single period per curve.
+///
+/// Returns a 2D numpy array of shape (n_curves, max_harmonics + 2).
+/// Each row is [ΔBIC_k0, ΔBIC_k1, ..., ΔBIC_kN, best_k].
+#[pyfunction]
+fn calc_mhf_per_k_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    max_harmonics: usize,
+) -> PyResult<Py<PyArray2<f32>>> {
+    let periods_slice = periods.as_slice()?;
+    let period_dts_slice = period_dts.as_slice()?;
+    let n_curves = times_list.len();
+    let max_k = max_harmonics.min(5);
+    let out_cols = max_k + 2; // ΔBIC for k=0..max_k, plus best_k
+
+    if n_curves != periods_slice.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "periods must have one entry per curve",
+        ));
+    }
+    if n_curves != period_dts_slice.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "period_dts must have one entry per curve",
+        ));
+    }
+
+    let times_vecs: Vec<&[f32]> = times_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mags_vecs: Vec<&[f32]> = mags_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let errs_vecs: Vec<&[f32]> = errs_list
+        .iter()
+        .map(|a| a.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flat = py.allow_threads(|| {
+        let mut output = vec![0.0f32; n_curves * out_cols];
+        output
+            .par_chunks_mut(out_cols)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let result = mhf::calc_mhf_per_k(
+                    times_vecs[ci],
+                    mags_vecs[ci],
+                    errs_vecs[ci],
+                    periods_slice[ci],
+                    period_dts_slice[ci],
+                    max_harmonics,
+                );
+                chunk.copy_from_slice(&result);
+            });
+        output
+    });
+
+    let output = Array2::from_shape_vec((n_curves, out_cols), flat)
+        .expect("shape mismatch in calc_mhf_per_k_batched");
+    Ok(output.into_pyarray(py).into())
+}
+
+/// Fused MHF + peak finding.
+#[pyfunction]
+fn calc_mhf_peaks_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f32>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f32>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f32>>,
+    periods: PyReadonlyArray1<'py, f32>,
+    period_dts: PyReadonlyArray1<'py, f32>,
+    max_harmonics: usize,
+    n_peaks: usize,
+    min_distance: usize,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray2<f32>>)> {
+    let n_curves = times_list.len();
+    let periods_s = periods.as_slice()?;
+    let period_dts_s = period_dts.as_slice()?;
+
+    let mut out_idx = Array2::<i64>::from_elem((n_curves, n_peaks), -1);
+    let mut out_val = Array2::<f32>::zeros((n_curves, n_peaks));
+
+    for ci in 0..n_curves {
+        let ts = times_list[ci].as_slice()?;
+        let ms = mags_list[ci].as_slice()?;
+        let es = errs_list[ci].as_slice()?;
+        let flat = mhf::calc_mhf(ts, ms, es, periods_s, period_dts_s, max_harmonics);
+        let (idx, val) = peaks::find_top_peaks(&flat, n_peaks, min_distance, true);
+        for i in 0..idx.len() {
+            out_idx[[ci, i]] = idx[i];
+            out_val[[ci, i]] = val[i];
+        }
+    }
+
+    Ok((
+        out_idx.into_pyarray(py).into(),
+        out_val.into_pyarray(py).into(),
+    ))
+}
+
+// ===========================================================================
 // High-cadence removal
 // ===========================================================================
 
@@ -794,6 +1242,17 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_ls_peaks_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_fpw_peaks_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_bls_peaks_batched, m)?)?;
+    // Matched filter
+    m.add_function(wrap_pyfunction!(calc_mf_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_mf_peaks_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_mf_features_batched, m)?)?;
+    // Multi-Harmonic Fourier
+    m.add_function(wrap_pyfunction!(calc_mhf_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_mhf_per_k_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_mhf_peaks_batched, m)?)?;
+    // Viterbi Narrowband
+    m.add_function(wrap_pyfunction!(calc_vn_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_vn_peaks_batched, m)?)?;
     // Feature extraction
     m.add_function(wrap_pyfunction!(remove_high_cadence_batched, m)?)?;
     m.add_function(wrap_pyfunction!(compute_dmdt_batched, m)?)?;
