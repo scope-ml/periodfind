@@ -130,11 +130,11 @@ __global__ void VNFusedKernel(const float* __restrict__ times,
     }
     __syncthreads();
 
-    float i_part;
     for (size_t idx = threadIdx.x; idx < length; idx += blockDim.x) {
         float t = times[idx];
-        float t_corr = t - pdt_corr * t * t;
-        float folded = fabsf(modff(t_corr / period, &i_part));
+        double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+        double ratio_d = t_corr_d / (double)period;
+        float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
         size_t phase_bin = h_params.PhaseBin(folded);
         size_t mag_bin = h_params.MagBin(mags[idx]);

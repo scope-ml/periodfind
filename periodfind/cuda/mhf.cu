@@ -117,8 +117,6 @@ __global__ void MHFKernel(const float* __restrict__ times,
 
     // --- Step 2: Accumulate normal equations via shared-memory atomicAdd ---
 
-    float i_part;
-
     for (size_t tile_start = 0; tile_start < length;
          tile_start += MHF_TILE_SIZE) {
         size_t tile_end = tile_start + MHF_TILE_SIZE;
@@ -139,9 +137,10 @@ __global__ void MHFKernel(const float* __restrict__ times,
             float y = sh_mags[i];
             float w = sh_ivar[i];
 
-            // Phase fold
-            float t_corr = t - pdt_corr * t * t;
-            float phase = fabsf(modff(t_corr / period, &i_part));
+            // Phase fold (promoted to f64 for precision over long baselines)
+            double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+            double ratio_d = t_corr_d / (double)period;
+            float phase = fabsf((float)(ratio_d - floor(ratio_d)));
             float phi = 2.0f * (float)M_PI * phase;
 
             // Build design matrix row

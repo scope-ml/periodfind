@@ -169,7 +169,6 @@ __global__ void MFKernel(const float* __restrict__ times,
     }
     __syncthreads();
 
-    float i_part;
 
     // Process light curve in tiles
     for (size_t tile_start = 0; tile_start < length; tile_start += MF_TILE_SIZE) {
@@ -189,8 +188,9 @@ __global__ void MFKernel(const float* __restrict__ times,
         // Accumulate into shared bins via atomicAdd
         for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
             float t = sh_times[i];
-            float t_corr = t - pdt_corr * t * t;
-            float folded = fabsf(modff(t_corr / period, &i_part));
+            double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+            double ratio_d = t_corr_d / (double)period;
+            float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
             size_t bin = static_cast<size_t>(folded / bin_size);
             if (bin >= n_bins) bin = n_bins - 1;

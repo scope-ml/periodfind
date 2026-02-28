@@ -137,6 +137,9 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Cython-generated C++ files (rebuilt from .pyx during build)
+periodfind/*.cpp
+
 # CMake stuff
 CMakeLists.txt.user
 CMakeCache.txt

@@ -86,8 +86,6 @@ __global__ void FoldBinKernel(const float* __restrict__ times,
         }
         __syncthreads();
 
-        float i_part;
-
         // Process the light curve in tiles
         for (size_t tile_start = 0; tile_start < length;
              tile_start += AOV_TILE_SIZE) {
@@ -106,8 +104,9 @@ __global__ void FoldBinKernel(const float* __restrict__ times,
             // Accumulate into shared bins via atomicAdd
             for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
                 float t = sh_times[i];
-                float t_corr = t - pdt_corr * t * t;
-                float folded = fabsf(modff(t_corr / period, &i_part));
+                double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+                double ratio_d = t_corr_d / (double)period;
+                float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
                 float mag = sh_mags[i];
                 float mag_sq = mag * mag;
@@ -142,13 +141,12 @@ __global__ void FoldBinKernel(const float* __restrict__ times,
             my_sq_sums[k] = 0.0f;
         }
 
-        float i_part;
-
         // Compute the histogram statistics into private arrays.
         for (size_t idx = threadIdx.x; idx < length; idx += blockDim.x) {
             float t = times[idx];
-            float t_corr = t - pdt_corr * t * t;
-            float folded = fabsf(modff(t_corr / period, &i_part));
+            double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+            double ratio_d = t_corr_d / (double)period;
+            float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
             float mag = mags[idx];
 

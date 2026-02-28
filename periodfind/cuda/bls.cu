@@ -109,8 +109,6 @@ __global__ void BLSKernel(const float* __restrict__ times,
         }
         __syncthreads();
 
-        float i_part;
-
         // Process the light curve in tiles
         for (size_t tile_start = 0; tile_start < length;
              tile_start += BLS_TILE_SIZE) {
@@ -130,8 +128,9 @@ __global__ void BLSKernel(const float* __restrict__ times,
             // Accumulate into shared bins via atomicAdd
             for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
                 float t = sh_times[i];
-                float t_corr = t - pdt_corr * t * t;
-                float folded = fabsf(modff(t_corr / period, &i_part));
+                double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+                double ratio_d = t_corr_d / (double)period;
+                float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
                 size_t bin = params.PhaseBin(folded);
                 if (bin >= n_bins)
@@ -163,8 +162,6 @@ __global__ void BLSKernel(const float* __restrict__ times,
             my_yw[k] = 0.0f;
         }
 
-        float i_part;
-
         // Process the light curve in tiles
         for (size_t tile_start = 0; tile_start < length;
              tile_start += BLS_TILE_SIZE) {
@@ -184,8 +181,9 @@ __global__ void BLSKernel(const float* __restrict__ times,
             // All threads accumulate into private arrays (no atomics)
             for (size_t i = threadIdx.x; i < tile_len; i += blockDim.x) {
                 float t = sh_times[i];
-                float t_corr = t - pdt_corr * t * t;
-                float folded = fabsf(modff(t_corr / period, &i_part));
+                double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+                double ratio_d = t_corr_d / (double)period;
+                float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
                 size_t bin = params.PhaseBin(folded);
                 if (bin >= n_bins)

@@ -70,7 +70,7 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
     float cos_cos = 0.0f;
     float cos_sin = 0.0f;
 
-    float cos_val, sin_val, i_part;
+    float cos_val, sin_val;
 
     // Process the light curve in tiles
     for (size_t tile_start = 0; tile_start < length;
@@ -92,8 +92,9 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
             float t = sh_times[i];
             float mag = sh_mags[i];
 
-            float t_corr = t - pdt_corr * t * t;
-            float folded = fabsf(modff(t_corr / period, &i_part));
+            double t_corr_d = (double)t - (double)pdt_corr * (double)t * (double)t;
+            double ratio_d = t_corr_d / (double)period;
+            float folded = fabsf((float)(ratio_d - floor(ratio_d)));
 
             sincosf(TWO_PI * folded, &sin_val, &cos_val);
 
