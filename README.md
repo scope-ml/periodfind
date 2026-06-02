@@ -132,6 +132,84 @@ To reproduce, run `python benchmarks/throughput_bench.py` followed by `python be
 
 ## Installing
 
+To complete the GPU installation, you need to install the CPU Backend (Rust).
+
+Make sure you have loaded a cuda model and installed nvcc.
+
+For DELTA users, you can follow these steps:
+
+### Installation on DELTA
+
+Create a conda environment and activate it.
+
+```bash
+conda create --name periodfind python=3.10
+conda activate periodfind.
+```
+
+Pick a cuda model of your choice. 
+
+```bash
+module availd cuda
+nvidia-smi
+```
+Load an available model.
+
+```bash
+module load cuda/12.8
+```
+
+GPU Backend for periodfind uses pycuda.
+
+```bash
+pip install pycuda
+```
+
+Check where module puts cuda.
+
+```bash
+echo $CUDA_HOME
+```
+Set the environment variables so the compiler can find cuda.
+
+```bash
+export CUDA_ROOT=$CUDA_HOME # or the output from echo $CUDA_HOME
+export PATH=$CUDA_ROOT/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_ROOT/lib64:$LD_LIBRARY_PATH
+```
+
+Install the dependencies.
+
+```bash
+pip install cython numpy
+```
+
+Clone the repository.
+
+```bash
+git clone https://github.com/scope-ml/periodfind.git
+```
+
+
+Install Rust toolchain.
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+Install maturin and build the CPU backend
+```bash
+pip install maturin
+cd periodfind/rust
+maturin develop --release
+```
+
+Run the installation for periodfind.
+```bash
+cd ..
+pip install -e .
+```
+
 ### GPU backend (CUDA)
 
 Requires CUDA installed with `nvcc` on your `PATH` (or set `$CUDA_HOME`).
