@@ -22,6 +22,7 @@ from periodfind_cpu import (
     calc_mhf_batched,
     calc_mhf_peaks_batched,
     calc_mhf_per_k_batched,
+    calc_tfs_batched,  # noqa: F401  (public API)
     calc_vn_batched,
     calc_vn_peaks_batched,
     compute_dmdt_batched,
@@ -1363,3 +1364,93 @@ class RemoveHighCadence:
         ensure_float32(mags, "mags")
         ensure_float32(errs, "errs")
         return remove_high_cadence_batched(times, mags, errs, self.cadence_minutes)
+
+
+class TemplateFitSampled:
+    """Multiband sampled template bank fitting (CPU backend).
+
+    Templates are held as samples on a phase grid, as computed, rather than
+    as a truncated Fourier series. The distinction matters for sharp features:
+    a series truncated to eleven coefficients reproduces a detached eclipsing
+    binary's eclipse to only about 39 per cent of its own depth, and the
+    blurred template then fits a wrong period convincingly.
+
+    The model at a trial period P, for band b:
+
+        mag_b(t) = offset_b + a * S[k, b]((t/P - phi) mod 1)
+
+    The offset is free per band and ``a`` is one amplitude shared across all
+    bands, so colour is a constraint the fit has to respect rather than a free
+    parameter per band. The score is the fraction of variance unexplained,
+    pooled over bands.
+
+    Every sum the score needs is a circular correlation between the folded
+    light curve and the template, so one transform gives the score at all
+    ``n_phase`` shifts at once. The light curve is binned onto the template's
+    own grid, which is the one approximation here: a bin is 1 / n_phase of a
+    cycle wide.
+
+    Parameters
+    ----------
+    samples : ndarray, shape (n_template, n_band, n_phase)
+        Each template's magnitude against phase, in each band. ``n_phase`` must
+        be a power of two. A constant offset per band is fitted, so the zero
+        point of each template does not matter.
+    """
+
+    def __init__(self, samples):
+        samples = np.ascontiguousarray(samples, dtype=np.float64)
+        if samples.ndim != 3:
+            raise ValueError("samples must be (n_template, n_band, n_phase)")
+        self.n_template, self.n_band, self.n_phase = samples.shape
+        if self.n_phase < 4 or (self.n_phase & (self.n_phase - 1)) != 0:
+            raise ValueError("n_phase must be a power of two, at least 4")
+        self._samples = np.ascontiguousarray(samples.ravel(), dtype=np.float64)
+
+    def calc(self, times, mags, bands, periods, min_points=12):
+        """Fit every light curve at each of its own trial periods.
+
+        Parameters
+        ----------
+        times, mags : list of ndarray
+            One array per light curve, in days and magnitudes.
+        bands : list of ndarray
+            Band index per point, 0 to n_band - 1.
+        periods : list of ndarray
+            Trial periods for that curve, in days.
+        min_points : int, default=12
+            A band with fewer points than this is skipped.
+
+        Returns
+        -------
+        ndarray, shape (n_curves, 5)
+            fvu, period, template, shift, amplitude. The shift is an index into
+            the phase grid, so the fitted phase is shift / n_phase of a cycle.
+            A curve with no usable band gives NaN and -1.
+        """
+        n = len(times)
+        if not (len(mags) == n and len(bands) == n and len(periods) == n):
+            raise ValueError(
+                "times, mags, bands and periods must be the same length"
+            )
+        t_list, m_list, b_list, p_list = [], [], [], []
+        for i in range(n):
+            t = np.ascontiguousarray(times[i], dtype=np.float64)
+            m = np.ascontiguousarray(mags[i], dtype=np.float64)
+            b = np.ascontiguousarray(bands[i], dtype=np.uint8)
+            p = np.ascontiguousarray(periods[i], dtype=np.float64)
+            if not (t.size == m.size == b.size):
+                raise ValueError(
+                    f"curve {i}: times, mags and bands differ in length"
+                )
+            if t.size == 0 or p.size == 0:
+                raise ValueError(f"curve {i} is empty")
+            t_list.append(t)
+            m_list.append(m)
+            b_list.append(b)
+            p_list.append(p)
+
+        return calc_tfs_batched(
+            t_list, m_list, b_list, p_list, self._samples,
+            self.n_template, self.n_band, self.n_phase, int(min_points),
+        )

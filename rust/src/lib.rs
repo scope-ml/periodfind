@@ -19,6 +19,7 @@ mod ls;
 mod mf;
 mod mhf;
 mod peaks;
+mod tfs;
 mod vn;
 
 // ===========================================================================
@@ -1226,6 +1227,60 @@ fn calc_basic_stats_batched<'py>(
 // ===========================================================================
 
 /// Native CPU implementations of period-finding algorithms.
+
+// ===========================================================================
+// Template Fit
+// ===========================================================================
+
+/// Template fitting with sampled templates, for a batch of light curves.
+///
+/// `samples` holds the bank laid out [template][band][phase] and is the
+/// template as computed, not a truncated series. Returns one row per curve:
+/// fvu, period, template, shift, amplitude, with the shift given as an index
+/// into the phase grid. Everything is f64: the score is an argmin over
+/// n_template * n_phase nearly tied columns.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn calc_tfs_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f64>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f64>>,
+    bands_list: Vec<PyReadonlyArray1<'py, u8>>,
+    periods_list: Vec<PyReadonlyArray1<'py, f64>>,
+    samples: PyReadonlyArray1<'py, f64>,
+    n_template: usize,
+    n_band: usize,
+    n_phase: usize,
+    min_points: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let times: Vec<Vec<f64>> = times_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let mags: Vec<Vec<f64>> = mags_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let bands: Vec<Vec<u8>> = bands_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let periods: Vec<Vec<f64>> = periods_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+
+    let bank = tfs::Bank::new(samples.as_slice().unwrap(), n_template, n_band,
+                              n_phase);
+
+    let fits = py.allow_threads(|| {
+        tfs::fit_batched(&times, &mags, &bands, &periods, &bank, min_points)
+    });
+
+    let mut out = Array2::<f64>::zeros((fits.len(), 5));
+    for (i, f) in fits.iter().enumerate() {
+        out[[i, 0]] = f.fvu;
+        out[[i, 1]] = f.period;
+        out[[i, 2]] = if f.template == usize::MAX { -1.0 } else { f.template as f64 };
+        out[[i, 3]] = if f.shift == usize::MAX { -1.0 } else { f.shift as f64 };
+        out[[i, 4]] = f.amp;
+    }
+    Ok(out.into_pyarray(py))
+}
+
+
 #[pymodule]
 fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Full periodogram
@@ -1253,6 +1308,8 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Viterbi Narrowband
     m.add_function(wrap_pyfunction!(calc_vn_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_vn_peaks_batched, m)?)?;
+    // Template fit
+    m.add_function(wrap_pyfunction!(calc_tfs_batched, m)?)?;
     // Feature extraction
     m.add_function(wrap_pyfunction!(remove_high_cadence_batched, m)?)?;
     m.add_function(wrap_pyfunction!(compute_dmdt_batched, m)?)?;

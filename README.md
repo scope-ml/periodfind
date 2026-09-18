@@ -14,6 +14,22 @@ A collection of CUDA-accelerated periodicity detection algorithms, with both C++
 | Fast Phase-folding Weighted | `periodfind.FPW` | `periodfind.gpu.FPW` | `periodfind.cpu.FPW` |
 | Box Least Squares | `periodfind.BoxLeastSquares` | `periodfind.gpu.BoxLeastSquares` | `periodfind.cpu.BoxLeastSquares` |
 
+### Template Fitting
+
+| Algorithm | Unified API | GPU (CUDA) | CPU (Rust) |
+|-----------|-------------|-----------|------------|
+| Sampled Template Fit | `periodfind.TemplateFitSampled` | `periodfind.gpu.TemplateFitSampled` | `periodfind.cpu.TemplateFitSampled` |
+
+Template fitting chooses among periods a periodogram has already proposed, using
+a model of the class rather than a generic statistic. A bank of templates is
+fitted to a multiband light curve at each of its own candidate periods, and the
+best `(period, template, phase, amplitude)` is returned. The offset is free per
+band but one amplitude is shared across all of them, so the band amplitude
+ratios are a constraint the fit has to respect. Templates are held as samples on
+a phase grid, and the light curve is folded onto that same grid, which turns
+every sum the score needs into a circular correlation: one transform gives the
+score at every phase shift at once. The bank is supplied by the caller.
+
 ### Feature Extraction
 
 | Algorithm | Unified API | CPU (Rust) |
