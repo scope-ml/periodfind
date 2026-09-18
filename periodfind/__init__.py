@@ -190,6 +190,20 @@ def MultiHarmonicFourier(**kwargs):
     return _Cls(**kwargs)
 
 
+def TemplateFitSampled(**kwargs):
+    """Create a sampled template bank fitter on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        from periodfind.tfs import TemplateFitSampled as _Cls
+    else:
+        from periodfind.cpu import TemplateFitSampled as _Cls
+    return _Cls(**kwargs)
+
+
 def FourierDecomposition(**kwargs):
     """Create a Fourier decomposition feature extractor.
 

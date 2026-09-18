@@ -43,6 +43,7 @@ nav:
     - Quick Start: getting-started/quickstart.md
   - User Guide:
     - Algorithms: user-guide/algorithms.md
+    - Template Banks: user-guide/template-banks.md
     - Benchmarks: benchmarks.md
   - API Reference:
     - Overview: api/index.md
