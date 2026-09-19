@@ -262,8 +262,11 @@ __global__ void ScoreKernel(const double* __restrict__ fc,
                             size_t n_band,
                             size_t n_phase,
                             double* __restrict__ best) {
-    const size_t k = blockIdx.x;  // template
-    const size_t job = blockIdx.y;
+    // job on x and template on y, not the other way round: gridDim.y is
+    // capped at 65,535 and the job count is curves times candidate periods,
+    // which passes that at a few hundred curves. gridDim.x allows 2^31-1.
+    const size_t job = blockIdx.x;
+    const size_t k = blockIdx.y;  // template
     const int tid = threadIdx.x;
 
     extern __shared__ double sh[];
@@ -573,7 +576,7 @@ void TemplateFitSampled::CalcTFSBatched(const std::vector<double*>& times,
     gpuErrchk(cudaPeekAtLastError());
 
     const size_t sh_score = 5 * n_phase_ * sizeof(double);
-    dim3 grid((unsigned int)n_template_, (unsigned int)n_job);
+    dim3 grid((unsigned int)n_job, (unsigned int)n_template_);
     ScoreKernel<<<grid, TFS_THREADS, sh_score>>>(d_fc, d_fs, d_stat, d_tss,
                                                  dev_fs_, dev_fs2_, n_template_,
                                                  n_band_, n_phase_, d_best);
