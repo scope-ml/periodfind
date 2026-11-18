@@ -11,6 +11,7 @@ from periodfind_cpu import (
     calc_basic_stats_batched,
     calc_ce_batched,
     calc_ce_peaks_batched,
+    calc_ellipsoidal_batched,
     calc_fourier_batched,
     calc_fpw_batched,
     calc_fpw_peaks_batched,
@@ -1453,4 +1454,112 @@ class TemplateFitSampled:
         return calc_tfs_batched(
             t_list, m_list, b_list, p_list, self._samples,
             self.n_template, self.n_band, self.n_phase, int(min_points),
+        )
+
+
+class EllipsoidalFit:
+    """Multiband ellipsoidal variable fit (CPU backend).
+
+    Fits the BEER model (Faigler & Mazeh 2011) in flux relative to each band's
+    weighted mean magnitude:
+
+        f_b(t) = F_b [1 - Ae_b cos 2φ - Ar_b cos φ + Ab_b sin φ]
+        φ = 2π (t - T0) / P
+
+    ``Ae`` is the ellipsoidal amplitude, ``Ar`` the reflection amplitude
+    together with the (R/a)^4 ellipsoidal term, and ``Ab`` the Doppler beaming
+    amplitude. T0, the conjunction with the companion in front of the visible
+    star, is shared by all bands; the amplitudes are free per band, and every
+    point is weighted by its photometric error.
+
+    The strongest periodogram peak of an ellipsoidal variable sits at half the
+    orbital period. With ``double_periods=True`` each trial period is taken as
+    such a peak and the fit runs at twice it. The comparison model is a
+    sinusoid at P/2 with a free phase per band, so ``delta_bic`` is positive
+    only when the odd harmonics, the unequal minima and maxima, are detected.
+    T0 is reported on the branch with positive ``Ae`` and ``Ab``; when beaming
+    is undetected, T0 is ambiguous by half an orbit.
+
+    Parameters
+    ----------
+    n_band : int, default=3
+        Number of bands. Points with a band index at or above this are ignored.
+    n_t0 : int, default=128
+        Grid points in the T0 scan over a quarter cycle. The minimum is then
+        refined by a parabola through its neighbours.
+    double_periods : bool, default=True
+        Fit at twice each trial period.
+    """
+
+    _SCALARS = ["period", "t0", "chi2", "delta_bic", "delta_bic_flat", "n_points"]
+    _PER_BAND = ["A_ellip", "A_ellip_err", "A_beam", "A_beam_err", "A_refl", "A_refl_err"]
+
+    def __init__(self, n_band=3, n_t0=128, double_periods=True):
+        if not 1 <= n_band <= 256:
+            raise ValueError(f"n_band must be between 1 and 256, got {n_band}")
+        if n_t0 < 4:
+            raise ValueError(f"n_t0 must be at least 4, got {n_t0}")
+        self.n_band = int(n_band)
+        self.n_t0 = int(n_t0)
+        self.double_periods = bool(double_periods)
+
+    @property
+    def columns(self):
+        """Names of the output columns, with the band index as a suffix."""
+        return self._SCALARS + [
+            f"{name}_{b}" for b in range(self.n_band) for name in self._PER_BAND
+        ]
+
+    def calc(self, times, mags, errs, bands, periods, min_points=12):
+        """Fit every light curve at each of its own trial periods.
+
+        Parameters
+        ----------
+        times, mags, errs : list of ndarray
+            One array per light curve, in days and magnitudes.
+        bands : list of ndarray
+            Band index per point, 0 to n_band - 1.
+        periods : list of ndarray
+            Trial periods for that curve, in days: periodogram peaks when
+            ``double_periods`` is set, orbital periods otherwise.
+        min_points : int, default=12
+            A band with fewer usable points than this is skipped.
+
+        Returns
+        -------
+        ndarray, shape (n_curves, 6 + 6 * n_band)
+            ``period, t0, chi2, delta_bic, delta_bic_flat, n_points``, then
+            ``A_ellip, A_ellip_err, A_beam, A_beam_err, A_refl, A_refl_err``
+            for each band; ``columns`` names them. ``period`` is the orbital
+            period of the best fit, ``t0`` is in the time system of ``times``,
+            and ``delta_bic_flat`` compares the fit with a constant. A skipped
+            band, or a curve with no usable band, gives NaN.
+        """
+        n = len(times)
+        if not (len(mags) == n and len(errs) == n and len(bands) == n and len(periods) == n):
+            raise ValueError(
+                "times, mags, errs, bands and periods must be the same length"
+            )
+        t_list, m_list, e_list, b_list, p_list = [], [], [], [], []
+        for i in range(n):
+            t = np.ascontiguousarray(times[i], dtype=np.float64)
+            m = np.ascontiguousarray(mags[i], dtype=np.float64)
+            e = np.ascontiguousarray(errs[i], dtype=np.float64)
+            b = np.ascontiguousarray(bands[i], dtype=np.uint8)
+            p = np.ascontiguousarray(np.atleast_1d(periods[i]), dtype=np.float64)
+            if not (t.size == m.size == e.size == b.size):
+                raise ValueError(
+                    f"curve {i}: times, mags, errs and bands differ in length"
+                )
+            if p.size == 0:
+                raise ValueError(f"curve {i} has no trial periods")
+            t_list.append(t)
+            m_list.append(m)
+            e_list.append(e)
+            b_list.append(b)
+            p_list.append(p)
+
+        return calc_ellipsoidal_batched(
+            t_list, m_list, e_list, b_list, p_list, self.n_band, self.n_t0,
+            self.double_periods, int(min_points),
         )
