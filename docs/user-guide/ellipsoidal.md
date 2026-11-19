@@ -56,7 +56,14 @@ information when beaming is undetected.
 
 With `double_periods=True` (the default) each trial period is taken as a
 periodogram peak at $P_\mathrm{orb}/2$ and the fit runs at twice it; the
-candidate with the lowest $\chi^2$ is reported. `delta_bic` compares the BEER
+candidate with the best fit is reported. By default (`weighting="fvu"`) every
+point has equal weight, so the best fit is the one with the lowest fraction of
+variance unexplained (FVU), as in `TemplateFitSampled`, and the quoted errors do
+not affect the choice; `weighting="chi2"` weights points by their errors. The
+BIC values use each band's noise level estimated from its own residuals,
+$\mathrm{BIC} = \sum_b n_b \ln(\mathrm{RSS}_b/n_b) + k \ln n$, so they do not
+depend on the scale of the quoted errors, which for survey photometry is often
+too small. `delta_bic` compares the BEER
 fit with a sinusoid at $P_\mathrm{orb}/2$ that has a free phase per band, so it
 is positive when the odd harmonics are detected and negative for a pure
 $\cos 2\phi$ light curve.
@@ -77,8 +84,9 @@ print(res["period"][candidates], res["A_ellip_1"][candidates])
 The output has one row per curve: `period`, `t0`, `chi2`, `delta_bic`,
 `delta_bic_flat`, and `n_points`, followed by `A_ellip`, `A_ellip_err`,
 `A_beam`, `A_beam_err`, `A_refl`, and `A_refl_err` for each band, named in
-`fit.columns` with the band index as a suffix. The errors are the formal
-least-squares errors at the fitted $T_0$. The ratio of $A_\mathrm{ellip}$ across
+`fit.columns` with the band index as a suffix. The errors are the least-squares
+errors at the fitted $T_0$, scaled by each band's residual variance. A band whose
+fit is singular returns NaN for its own columns only. The ratio of $A_\mathrm{ellip}$ across
 bands should follow $\alpha_\mathrm{ellip}(u, \tau)$ for the star's temperature
 and gravity, which tests the ellipsoidal interpretation independently of
 `delta_bic`; the threshold on `delta_bic` should be set on simulated light
