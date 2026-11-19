@@ -26,6 +26,8 @@ specified device via the `device` keyword).
 
 ::: periodfind.FourierDecomposition
 
+::: periodfind.EllipsoidalFit
+
 ::: periodfind.DmDt
 
 ::: periodfind.BasicStats

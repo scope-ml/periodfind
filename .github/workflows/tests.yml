@@ -45,7 +45,7 @@ jobs:
       - name: Run unit and CPU tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_periodfind.py tests/test_cpu_standalone.py tests/test_fourier.py tests/test_batch_features.py -v
+          pytest tests/test_periodfind.py tests/test_cpu_standalone.py tests/test_fourier.py tests/test_batch_features.py tests/test_ellipsoidal_fit.py -v
 
   # cuda-tests:
   #   runs-on: [self-hosted, gpu]

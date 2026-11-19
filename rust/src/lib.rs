@@ -11,6 +11,7 @@ mod basicstats;
 mod bls;
 mod ce;
 mod dmdt;
+mod ellipsoidal;
 mod fold;
 mod fourier;
 mod fpw;
@@ -1280,6 +1281,54 @@ fn calc_tfs_batched<'py>(
     Ok(out.into_pyarray(py))
 }
 
+// ===========================================================================
+// Ellipsoidal Fit
+// ===========================================================================
+
+/// BEER fit (ellipsoidal, beaming, reflection) for a batch of light curves.
+///
+/// Returns one row per curve: period, t0, chi2, delta_bic, delta_bic_flat,
+/// n_points, then Ae, Ae_err, Ab, Ab_err, Ar, Ar_err for each band.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn calc_ellipsoidal_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f64>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f64>>,
+    errs_list: Vec<PyReadonlyArray1<'py, f64>>,
+    bands_list: Vec<PyReadonlyArray1<'py, u8>>,
+    periods_list: Vec<PyReadonlyArray1<'py, f64>>,
+    n_band: usize,
+    n_t0: usize,
+    double_periods: bool,
+    min_points: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let times: Vec<Vec<f64>> = times_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let mags: Vec<Vec<f64>> = mags_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let errs: Vec<Vec<f64>> = errs_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let bands: Vec<Vec<u8>> = bands_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+    let periods: Vec<Vec<f64>> = periods_list.iter()
+        .map(|a| a.as_slice().unwrap().to_vec()).collect();
+
+    let fits = py.allow_threads(|| {
+        ellipsoidal::fit_batched(&times, &mags, &errs, &bands, &periods, n_band,
+                                 n_t0, double_periods, min_points)
+    });
+
+    let ncol = ellipsoidal::N_SCALAR + ellipsoidal::N_PER_BAND * n_band;
+    let mut out = vec![0.0f64; fits.len() * ncol];
+    for (i, f) in fits.iter().enumerate() {
+        f.write_row(&mut out[i * ncol..(i + 1) * ncol]);
+    }
+    let out = Array2::from_shape_vec((fits.len(), ncol), out)
+        .expect("row length matches column count");
+    Ok(out.into_pyarray(py))
+}
+
 
 #[pymodule]
 fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1310,6 +1359,7 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_vn_peaks_batched, m)?)?;
     // Template fit
     m.add_function(wrap_pyfunction!(calc_tfs_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_ellipsoidal_batched, m)?)?;
     // Feature extraction
     m.add_function(wrap_pyfunction!(remove_high_cadence_batched, m)?)?;
     m.add_function(wrap_pyfunction!(compute_dmdt_batched, m)?)?;

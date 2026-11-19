@@ -35,8 +35,11 @@ score at every phase shift at once. The bank is supplied by the caller.
 | Algorithm | Unified API | CPU (Rust) |
 |-----------|-------------|------------|
 | Fourier Decomposition | `periodfind.FourierDecomposition` | `periodfind.cpu.FourierDecomposition` |
+| Ellipsoidal Fit | `periodfind.EllipsoidalFit` | `periodfind.cpu.EllipsoidalFit` |
 
 Fourier decomposition computes weighted linear least-squares Fourier fits with BIC model selection (0-5 harmonics) for a batch of light curves given pre-determined periods. Returns 14 features per curve: `[power, BIC, offset, slope, A1, B1, A2, B2, A3, B3, A4, B4, A5, B5]`. This replaces the per-source `scipy.optimize.curve_fit` approach with a direct Cholesky solve, giving identical results orders of magnitude faster.
+
+Ellipsoidal fit fits the BEER model (ellipsoidal, beaming, reflection; Faigler & Mazeh 2011) to a multiband light curve at twice each periodogram peak, with the conjunction time shared across bands and the three amplitudes free per band, and reports the ΔBIC against a sinusoid at half the orbital period, which is positive when the unequal minima and maxima are detected. Returns `6 + 6 * n_band` columns per curve, named by `EllipsoidalFit.columns`. See `docs/user-guide/ellipsoidal.md`.
 
 ## Device API
 

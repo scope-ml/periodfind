@@ -111,6 +111,13 @@ over 0-5 harmonics. Returns 14 features per curve:
 This replaces per-source `scipy.optimize.curve_fit` with a direct Cholesky
 solve, giving identical results orders of magnitude faster.
 
+### Ellipsoidal Fit
+
+Fits the BEER model (ellipsoidal, beaming, reflection) to multiband light
+curves at twice each periodogram peak, with the conjunction time shared across
+bands and the amplitudes free per band, and reports the ΔBIC against a sinusoid
+at half the orbital period. See [Ellipsoidal Variables](ellipsoidal.md).
+
 ### dm-dt Histograms
 
 Computes L2-normalised 2D histograms of pairwise magnitude differences vs.

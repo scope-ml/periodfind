@@ -227,6 +227,29 @@ def FourierDecomposition(**kwargs):
     return _Cls(**kwargs)
 
 
+def EllipsoidalFit(**kwargs):
+    """Create a multiband ellipsoidal variable fitter.
+
+    CPU-only for now.  If ``device='gpu'`` is requested, falls back to
+    CPU with a warning.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    import warnings
+
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        warnings.warn(
+            "EllipsoidalFit does not have a GPU backend; falling back to CPU.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    from periodfind.cpu import EllipsoidalFit as _Cls
+
+    return _Cls(**kwargs)
+
+
 def DmDt(**kwargs):
     """Create a dm-dt histogram feature extractor (CPU-only)."""
     kwargs.pop("device", None)

@@ -25,6 +25,8 @@ These classes are CPU-only (no GPU backend).
 
 ::: periodfind.cpu.FourierDecomposition
 
+::: periodfind.cpu.EllipsoidalFit
+
 ::: periodfind.cpu.DmDt
 
 ::: periodfind.cpu.BasicStats
