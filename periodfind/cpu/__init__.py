@@ -4,6 +4,8 @@ Provides the same API as the CUDA-backed Cython wrappers (ce.pyx, aov.pyx,
 ls.pyx), but uses a Rust+Rayon backend that runs on the CPU.
 """
 
+import warnings
+
 import numpy as np
 from periodfind_cpu import (
     calc_aov_batched,
@@ -1480,6 +1482,12 @@ class EllipsoidalFit:
     T0 is reported on the branch with positive ``Ae`` and ``Ab``; when beaming
     is undetected, T0 is ambiguous by half an orbit.
 
+    By default every point has equal weight, so the best trial period is the one
+    with the lowest fraction of variance unexplained (FVU), as in
+    ``TemplateFitSampled``, and the quoted errors do not affect the choice. The
+    BIC values and the amplitude errors use each band's noise level estimated
+    from its own residuals, so they do not depend on the scale of the errors.
+
     Parameters
     ----------
     n_band : int, default=3
@@ -1489,12 +1497,15 @@ class EllipsoidalFit:
         refined by a parabola through its neighbours.
     double_periods : bool, default=True
         Fit at twice each trial period.
+    weighting : {'fvu', 'chi2'}, default='fvu'
+        ``'fvu'`` weights every point equally; ``'chi2'`` weights points by
+        their photometric errors.
     """
 
     _SCALARS = ["period", "t0", "chi2", "delta_bic", "delta_bic_flat", "n_points"]
     _PER_BAND = ["A_ellip", "A_ellip_err", "A_beam", "A_beam_err", "A_refl", "A_refl_err"]
 
-    def __init__(self, n_band=3, n_t0=128, double_periods=True):
+    def __init__(self, n_band=3, n_t0=128, double_periods=True, weighting="fvu"):
         if not 1 <= n_band <= 256:
             raise ValueError(f"n_band must be between 1 and 256, got {n_band}")
         if n_t0 < 4:
@@ -1502,6 +1513,9 @@ class EllipsoidalFit:
         self.n_band = int(n_band)
         self.n_t0 = int(n_t0)
         self.double_periods = bool(double_periods)
+        if weighting not in ("fvu", "chi2"):
+            raise ValueError(f"weighting must be 'fvu' or 'chi2', got {weighting!r}")
+        self.weighting = weighting
 
     @property
     def columns(self):
@@ -1553,6 +1567,13 @@ class EllipsoidalFit:
                 )
             if p.size == 0:
                 raise ValueError(f"curve {i} has no trial periods")
+            if b.size and int(b.max()) >= self.n_band:
+                warnings.warn(
+                    f"curve {i}: {int((b >= self.n_band).sum())} points have a band index "
+                    f">= n_band={self.n_band} and are ignored",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             t_list.append(t)
             m_list.append(m)
             e_list.append(e)
@@ -1561,5 +1582,5 @@ class EllipsoidalFit:
 
         return calc_ellipsoidal_batched(
             t_list, m_list, e_list, b_list, p_list, self.n_band, self.n_t0,
-            self.double_periods, int(min_points),
+            self.double_periods, int(min_points), self.weighting == "fvu",
         )

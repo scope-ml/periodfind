@@ -144,3 +144,44 @@ def test_rejects_mismatched_inputs():
         fit.calc([t], [m], [e], [b], [[]])
     with pytest.raises(ValueError):
         EllipsoidalFit(n_t0=2)
+
+
+def test_default_weighting_is_fvu():
+    assert EllipsoidalFit().weighting == "fvu"
+    with pytest.raises(ValueError):
+        EllipsoidalFit(weighting="bad")
+
+
+def test_fvu_ignores_error_scale():
+    # Equal weights: rescaling every quoted error leaves the fit unchanged.
+    t, m, e, b = make_curve(seed=21)
+    fit = EllipsoidalFit(n_band=3)
+    a = fit.calc([t], [m], [e], [b], [[PERIOD / 2, 0.3]])
+    c = fit.calc([t], [m], [e / 30.0], [b], [[PERIOD / 2, 0.3]])
+    np.testing.assert_allclose(a, c, rtol=1e-9, equal_nan=True)
+
+
+def test_chi2_weighting_recovers_period():
+    t, m, e, b = make_curve(seed=22)
+    out = EllipsoidalFit(n_band=3, weighting="chi2").calc(
+        [t], [m], [e], [b], [[0.21, PERIOD / 2, 0.29]]
+    )
+    assert abs(out[0, 0] - PERIOD) < 1e-9
+
+
+def test_delta_bic_ignores_error_scale():
+    # A pure cos 2phi curve with errors 30x too small is still better described at P/2.
+    t, m, e, b = make_curve(
+        period=0.5, amps=[(0.03, 0.0, 0.0)] * 2, n_points=2000, noise=0.003, seed=23
+    )
+    for weighting in ("fvu", "chi2"):
+        out = EllipsoidalFit(n_band=2, weighting=weighting).calc(
+            [t], [m], [e / 30.0], [b], [[0.25]]
+        )
+        assert out[0, 3] < 0, (weighting, out[0, 3])
+
+
+def test_warns_when_band_index_too_high():
+    t, m, e, b = make_curve(seed=24)
+    with pytest.warns(RuntimeWarning, match="n_band=2"):
+        EllipsoidalFit(n_band=2).calc([t], [m], [e], [b], [[PERIOD / 2]])

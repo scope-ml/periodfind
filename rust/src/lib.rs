@@ -1302,6 +1302,7 @@ fn calc_ellipsoidal_batched<'py>(
     n_t0: usize,
     double_periods: bool,
     min_points: usize,
+    fvu: bool,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let times: Vec<Vec<f64>> = times_list.iter()
         .map(|a| a.as_slice().unwrap().to_vec()).collect();
@@ -1316,7 +1317,7 @@ fn calc_ellipsoidal_batched<'py>(
 
     let fits = py.allow_threads(|| {
         ellipsoidal::fit_batched(&times, &mags, &errs, &bands, &periods, n_band,
-                                 n_t0, double_periods, min_points)
+                                 n_t0, double_periods, min_points, fvu)
     });
 
     let ncol = ellipsoidal::N_SCALAR + ellipsoidal::N_PER_BAND * n_band;

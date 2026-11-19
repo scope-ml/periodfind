@@ -28,6 +28,14 @@
 /// positive when the odd harmonics (unequal minima and maxima) are detected; a
 /// pure cos 2φ light curve gives a negative value, since it is equally well
 /// described at half the period.
+///
+/// Weighting. By default (`fvu = true`) every point has equal weight, so the
+/// best period is the one with the lowest fraction of variance unexplained
+/// (FVU), as in `TemplateFitSampled`, and the quoted errors play no part. With
+/// `fvu = false` points are weighted by their photometric errors (chi-squared).
+/// Either way, each band's noise level for the BIC and for the amplitude errors
+/// is estimated from its own residuals, BIC = sum_b n_b ln(RSS_b / n_b) + k ln n,
+/// so neither depends on the scale of the quoted errors.
 use std::f64::consts::PI;
 
 use rayon::prelude::*;
@@ -123,7 +131,7 @@ struct Band {
     w: Vec<f64>,
 }
 
-fn to_flux(t: &[f64], m: &[f64], e: &[f64], t_ref: f64) -> Band {
+fn to_flux(t: &[f64], m: &[f64], e: &[f64], t_ref: f64, fvu: bool) -> Band {
     let (mut sw, mut swm) = (0.0, 0.0);
     for i in 0..m.len() {
         let w = 1.0 / (e[i] * e[i]);
@@ -143,7 +151,7 @@ fn to_flux(t: &[f64], m: &[f64], e: &[f64], t_ref: f64) -> Band {
         let sf = DFLUX_DMAG * f * e[i];
         band.dt.push(t[i] - t_ref);
         band.y.push(f - 1.0);
-        band.w.push(1.0 / (sf * sf));
+        band.w.push(if fvu { 1.0 } else { 1.0 / (sf * sf) });
     }
     band
 }
@@ -153,6 +161,7 @@ struct Sums {
     g: [[f64; 5]; 5],
     h: [f64; 5],
     yy: f64,
+    n: usize,
 }
 
 impl Sums {
@@ -177,7 +186,12 @@ impl Sums {
                 g[a][b] = g[b][a];
             }
         }
-        Sums { g, h, yy }
+        Sums {
+            g,
+            h,
+            yy,
+            n: d.y.len(),
+        }
     }
 
     /// Weighted least squares on the basis functions given as rows of `m`,
@@ -247,6 +261,23 @@ const HALF_BASIS: [[f64; 5]; 3] = [
 
 const FLAT_BASIS: [[f64; 5]; 1] = [[1.0, 0.0, 0.0, 0.0, 0.0]];
 
+/// Residual sum for one band under the basis `m`, NaN if singular.
+fn band_rss(s: &Sums, m: &[[f64; 5]]) -> f64 {
+    let mut x = [0.0f64; 4];
+    s.solve(m, &mut x, None).unwrap_or(f64::NAN)
+}
+
+/// sum_b n_b ln(RSS_b / n_b): the BIC likelihood term with each band's noise
+/// level estimated from its own residuals.
+fn residual_loglik_term(sums: &[Sums], m: &[[f64; 5]]) -> f64 {
+    sums.iter()
+        .map(|s| {
+            let n = s.n as f64;
+            n * (band_rss(s, m).max(1e-300) / n).ln()
+        })
+        .sum()
+}
+
 fn pooled_chi2(sums: &[Sums], m: &[[f64; 5]]) -> Option<f64> {
     let mut x = [0.0f64; 4];
     sums.iter().map(|s| s.solve(m, &mut x, None)).sum()
@@ -310,7 +341,16 @@ fn band_fits(sums: &[Sums], theta: f64) -> Option<Vec<BandFit>> {
         .map(|s| {
             let mut x = [0.0f64; 4];
             let mut cov = [0.0f64; 16];
-            s.solve(&m, &mut x, Some(&mut cov))?;
+            // A singular band gives NaN for that band only.
+            let Some(rss) = s.solve(&m, &mut x, Some(&mut cov)) else {
+                return Some(BandFit::NAN);
+            };
+            // Scale the formal covariance by the band's residual variance, so the
+            // amplitude errors follow the actual scatter whatever the weighting.
+            let scale = rss / (s.n as f64 - 4.0).max(1.0);
+            for c in cov.iter_mut() {
+                *c *= scale;
+            }
             let (a_ellip, a_ellip_err) = amplitude(&x, &cov, 1, -1.0);
             let (a_refl, a_refl_err) = amplitude(&x, &cov, 2, -1.0);
             let (a_beam, a_beam_err) = amplitude(&x, &cov, 3, 1.0);
@@ -341,6 +381,7 @@ pub fn fit_one(
     n_t0: usize,
     double_periods: bool,
     min_points: usize,
+    fvu: bool,
 ) -> Fit {
     let mut bt: Vec<Vec<f64>> = vec![Vec::new(); n_band];
     let mut bm: Vec<Vec<f64>> = vec![Vec::new(); n_band];
@@ -367,7 +408,7 @@ pub fn fit_one(
         .fold(f64::INFINITY, f64::min);
     let data: Vec<Band> = used
         .iter()
-        .map(|&b| to_flux(&bt[b], &bm[b], &be[b], t_ref))
+        .map(|&b| to_flux(&bt[b], &bm[b], &be[b], t_ref, fvu))
         .collect();
     let n_points: usize = data.iter().map(|d| d.y.len()).sum();
 
@@ -414,9 +455,9 @@ pub fn fit_one(
 
     let ln_n = (n_points as f64).ln();
     let nb = used.len() as f64;
-    let bic_beer = chi2 + (4.0 * nb + 1.0) * ln_n;
-    let bic_half = pooled_chi2(&sums, &HALF_BASIS).map_or(f64::NAN, |c| c + 3.0 * nb * ln_n);
-    let bic_flat = pooled_chi2(&sums, &FLAT_BASIS).map_or(f64::NAN, |c| c + nb * ln_n);
+    let bic_beer = residual_loglik_term(&sums, &beer_basis(theta)) + (4.0 * nb + 1.0) * ln_n;
+    let bic_half = residual_loglik_term(&sums, &HALF_BASIS) + 3.0 * nb * ln_n;
+    let bic_flat = residual_loglik_term(&sums, &FLAT_BASIS) + nb * ln_n;
 
     let mut out_bands = vec![BandFit::NAN; n_band];
     for (k, &b) in used.iter().enumerate() {
@@ -446,6 +487,7 @@ pub fn fit_batched(
     n_t0: usize,
     double_periods: bool,
     min_points: usize,
+    fvu: bool,
 ) -> Vec<Fit> {
     (0..times.len())
         .into_par_iter()
@@ -460,6 +502,7 @@ pub fn fit_batched(
                 n_t0,
                 double_periods,
                 min_points,
+                fvu,
             )
         })
         .collect()
@@ -525,7 +568,7 @@ mod tests {
     }
 
     fn run(c: &Curve, periods: &[f64], n_band: usize) -> Fit {
-        fit_one(&c.t, &c.m, &c.e, &c.b, periods, n_band, 128, true, 12)
+        fit_one(&c.t, &c.m, &c.e, &c.b, periods, n_band, 128, true, 12, true)
     }
 
     /// Distance between two times modulo the period, as a fraction of it.
@@ -607,6 +650,68 @@ mod tests {
         let fit = run(&c, &[0.185], 3);
         assert!(fit.bands[0].a_ellip.is_finite());
         assert!(fit.bands[1].a_ellip.is_finite());
+        assert!(fit.bands[2].a_ellip.is_nan());
+    }
+
+    #[test]
+    fn chi2_weighting_still_recovers_amplitudes() {
+        let (period, t0) = (0.37, 60000.123);
+        let c = make_curve(period, t0, &AMPS, 3000, 0.001, 7);
+        let fit = fit_one(
+            &c.t,
+            &c.m,
+            &c.e,
+            &c.b,
+            &[period / 2.0],
+            3,
+            128,
+            true,
+            12,
+            false,
+        );
+        assert!((fit.period - period).abs() < 1e-12);
+        for (b, &(ae, _, _)) in AMPS.iter().enumerate() {
+            let f = fit.bands[b];
+            assert!(
+                (f.a_ellip - ae).abs() < 5.0 * f.a_ellip_err,
+                "band {b}: Ae {}",
+                f.a_ellip
+            );
+        }
+    }
+
+    #[test]
+    fn delta_bic_does_not_depend_on_error_scale() {
+        // Quoted errors 30x too small must not turn a pure cos 2φ curve into a
+        // detection of odd harmonics, with either weighting.
+        let amps = [(0.03, 0.0, 0.0), (0.03, 0.0, 0.0)];
+        let mut c = make_curve(0.5, 60000.2, &amps, 2000, 0.003, 8);
+        for e in c.e.iter_mut() {
+            *e /= 30.0;
+        }
+        for fvu in [true, false] {
+            let fit = fit_one(&c.t, &c.m, &c.e, &c.b, &[0.25], 2, 128, true, 12, fvu);
+            assert!(
+                fit.delta_bic < 0.0,
+                "fvu {fvu}: delta_bic {}",
+                fit.delta_bic
+            );
+        }
+    }
+
+    #[test]
+    fn singular_band_is_nan_alone() {
+        // Band 2 has 12 points at a single time: its fit is singular, the others are not.
+        let mut c = make_curve(0.37, 60000.1, &AMPS[..2], 2000, 0.001, 9);
+        for _ in 0..12 {
+            c.t.push(60500.0);
+            c.m.push(17.0);
+            c.e.push(0.001);
+            c.b.push(2);
+        }
+        let fit = run(&c, &[0.185], 3);
+        assert!(fit.period.is_finite());
+        assert!(fit.bands[0].a_ellip.is_finite() && fit.bands[1].a_ellip.is_finite());
         assert!(fit.bands[2].a_ellip.is_nan());
     }
 
