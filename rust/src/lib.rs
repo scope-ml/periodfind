@@ -17,6 +17,7 @@ mod fourier;
 mod fpw;
 mod highcadence;
 mod ls;
+mod mca;
 mod mf;
 mod mhf;
 mod peaks;
@@ -1330,6 +1331,65 @@ fn calc_ellipsoidal_batched<'py>(
     Ok(out.into_pyarray(py))
 }
 
+// ===========================================================================
+// Multi-criterion ascent (MCA)
+// ===========================================================================
+
+/// MCA period search for a batch of light curves, started from candidate
+/// periods. Returns one row per curve: n_starts, n_optima, then the `top`
+/// best periods and their scores (NaN padded).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn calc_mca_batched<'py>(
+    py: Python<'py>,
+    times_list: Vec<PyReadonlyArray1<'py, f64>>,
+    mags_list: Vec<PyReadonlyArray1<'py, f64>>,
+    bands_list: Vec<PyReadonlyArray1<'py, u8>>,
+    periods_list: Vec<PyReadonlyArray1<'py, f64>>,
+    f_max: f64,
+    oversample: f64,
+    tol: f64,
+    max_iter: usize,
+    top: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let times: Vec<Vec<f64>> = times_list
+        .iter()
+        .map(|a| a.as_slice().unwrap().to_vec())
+        .collect();
+    let mags: Vec<Vec<f64>> = mags_list
+        .iter()
+        .map(|a| a.as_slice().unwrap().to_vec())
+        .collect();
+    let bands: Vec<Vec<u8>> = bands_list
+        .iter()
+        .map(|a| a.as_slice().unwrap().to_vec())
+        .collect();
+    let periods: Vec<Vec<f64>> = periods_list
+        .iter()
+        .map(|a| a.as_slice().unwrap().to_vec())
+        .collect();
+
+    let res = py.allow_threads(|| {
+        mca::mca_batched(
+            &times, &mags, &bands, &periods, f_max, oversample, tol, max_iter, top,
+        )
+    });
+
+    let ncol = 2 + 2 * top;
+    let mut out = vec![f64::NAN; res.len() * ncol];
+    for (i, r) in res.iter().enumerate() {
+        let row = &mut out[i * ncol..(i + 1) * ncol];
+        row[0] = r.n_starts as f64;
+        row[1] = r.n_optima as f64;
+        for (k, (p, s)) in r.periods.iter().zip(r.scores.iter()).enumerate() {
+            row[2 + k] = *p;
+            row[2 + top + k] = *s;
+        }
+    }
+    let out =
+        Array2::from_shape_vec((res.len(), ncol), out).expect("row length matches column count");
+    Ok(out.into_pyarray(py))
+}
 
 #[pymodule]
 fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1361,6 +1421,7 @@ fn periodfind_cpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Template fit
     m.add_function(wrap_pyfunction!(calc_tfs_batched, m)?)?;
     m.add_function(wrap_pyfunction!(calc_ellipsoidal_batched, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_mca_batched, m)?)?;
     // Feature extraction
     m.add_function(wrap_pyfunction!(remove_high_cadence_batched, m)?)?;
     m.add_function(wrap_pyfunction!(compute_dmdt_batched, m)?)?;

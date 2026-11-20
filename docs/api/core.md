@@ -22,6 +22,8 @@ specified device via the `device` keyword).
 
 ::: periodfind.FPW
 
+::: periodfind.MultiCriterionAscent
+
 ## Feature Extraction Factory Functions
 
 ::: periodfind.FourierDecomposition

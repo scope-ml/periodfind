@@ -19,6 +19,8 @@ All period-finding classes have the same API as their GPU counterparts.
 
 ::: periodfind.cpu.FPW
 
+::: periodfind.cpu.MultiCriterionAscent
+
 ## Feature Extraction
 
 These classes are CPU-only (no GPU backend).

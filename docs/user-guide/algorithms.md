@@ -76,6 +76,23 @@ A **maximum** in the FPW periodogram indicates the best-fit period.
 
 **Reference:** Finkbeiner et al. (2025).
 
+### Multi-Criterion Ascent (MCA)
+
+MCA refines candidate periods, for example the top peaks of the periodograms
+above, for sparse multi-night, multiband light curves. Each candidate starts a
+walker that climbs one score, the sum of four z-scored terms: two-harmonic
+power, robust residual scale, kernel phase dispersion and leave-one-night-out
+prediction error. The optima are returned by score.
+
+A **maximum** of the score indicates the best period.
+
+**Key parameters:**
+
+- `periods` — candidate periods per light curve (passed to `calc`)
+- `top` — number of optima returned (default: 50)
+
+See [Multi-Criterion Ascent](mca.md).
+
 ### Choosing an Algorithm
 
 | Feature | CE | AOV | LS | FPW |

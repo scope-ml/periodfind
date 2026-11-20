@@ -45,6 +45,7 @@ nav:
     - Algorithms: user-guide/algorithms.md
     - Template Banks: user-guide/template-banks.md
     - Ellipsoidal Variables: user-guide/ellipsoidal.md
+    - Multi-Criterion Ascent: user-guide/mca.md
     - Benchmarks: benchmarks.md
   - API Reference:
     - Overview: api/index.md

@@ -227,6 +227,20 @@ def FourierDecomposition(**kwargs):
     return _Cls(**kwargs)
 
 
+def MultiCriterionAscent(**kwargs):
+    """Create a multi-criterion ascent (MCA) period finder on the resolved device.
+
+    Accepts an optional ``device='cpu'|'gpu'`` keyword; all other keywords
+    are forwarded to the backend class constructor.
+    """
+    device = _resolve_device(kwargs.pop("device", None))
+    if device == "gpu":
+        from periodfind.mca import MultiCriterionAscent as _Cls
+    else:
+        from periodfind.cpu import MultiCriterionAscent as _Cls
+    return _Cls(**kwargs)
+
+
 def EllipsoidalFit(**kwargs):
     """Create a multiband ellipsoidal variable fitter.
 
