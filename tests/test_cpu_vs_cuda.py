@@ -45,6 +45,20 @@ from periodfind.cpu import (
 
 requires_gpu = pytest.mark.skipif(not HAS_GPU, reason="CUDA GPU not available")
 
+HAS_GPU_MCA = False
+if HAS_GPU:
+    try:
+        from periodfind.gpu import MultiCriterionAscent as CudaMCA
+
+        HAS_GPU_MCA = True
+    except ImportError:
+        pass
+from periodfind.cpu import MultiCriterionAscent as CpuMCA  # noqa: E402
+
+requires_gpu_mca = pytest.mark.skipif(
+    not HAS_GPU_MCA, reason="CUDA GPU or periodfind.mca not available"
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -567,3 +581,71 @@ class TestBLSCpuVsCuda:
         cpu_result = cpu_bls.calc([t], [m], periods, period_dts, output="stats")
 
         assert cuda_result[0].params[0] == pytest.approx(cpu_result[0].params[0])
+
+
+# ---------------------------------------------------------------------------
+# Multi-criterion ascent (MCA): CPU vs CUDA
+# ---------------------------------------------------------------------------
+
+
+def make_sparse_multiband(period, amp=0.3, noise=0.03, n_nights=14, seed=0):
+    """Sparse multiband curve: one visit a few days apart, 1-3 bands a visit, 6 points each."""
+    rng = np.random.default_rng(seed)
+    t, m, b = [], [], []
+    for night in range(n_nights):
+        base = 60000.0 + 4 * night + np.floor(2 * rng.random())
+        for band in range(3):
+            if rng.random() < 0.6:
+                tt = base + 0.1 + 0.25 * rng.random(6)
+                t.extend(tt)
+                b.extend([band] * 6)
+                m.extend(
+                    18.0
+                    + 0.3 * band
+                    + amp * np.sin(2 * np.pi * tt / period)
+                    + noise * rng.normal(size=6)
+                )
+    o = np.argsort(t)
+    return np.array(t)[o], np.array(m)[o], np.array(b, dtype=np.uint8)[o]
+
+
+@requires_gpu_mca
+class TestMCACpuVsCuda:
+    TRUE = (0.31, 0.57, 1.7, 3.3)
+
+    def _batch(self):
+        curves = [make_sparse_multiband(p, seed=k) for k, p in enumerate(self.TRUE)]
+        # starts: the true period nudged, its half and double, and a daily alias
+        starts = [np.array([1.003 * p, p / 2, 2 * p, 1 / (1 / p + 1)]) for p in self.TRUE]
+        args = [[c[k] for c in curves] for k in range(3)]
+        spans = np.array([np.ptp(c[0]) for c in curves])
+        return args, starts, spans
+
+    def test_best_period_agreement(self):
+        """Same starts and optima count; best periods equal to within one walker step."""
+        args, starts, spans = self._batch()
+        cpu = CpuMCA(f_max=40.0, top=5).calc(*args, starts)
+        gpu = CudaMCA(f_max=40.0, top=5).calc(*args, starts)
+        np.testing.assert_array_equal(cpu[:, :2], gpu[:, :2])
+        # tol = 1e-3 peak widths; trigonometric last digits may move a walker by one step
+        dx = np.abs(1 / cpu[:, 2] - 1 / gpu[:, 2]) * spans
+        assert np.all(dx <= 2e-3), dx
+
+    def test_both_detect_true_period(self):
+        """CPU and GPU both put the true period first."""
+        args, starts, _ = self._batch()
+        for cls in (CpuMCA, CudaMCA):
+            best = cls(f_max=40.0, top=5).calc(*args, starts)[:, 2]
+            np.testing.assert_allclose(best, self.TRUE, rtol=1e-2)
+
+    def test_nan_rows_agree(self):
+        """A curve with too few points gives zero counts and NaN periods on both backends."""
+        t, m, b = make_sparse_multiband(0.31)
+        args = ([t[:5], t], [m[:5], m], [b[:5], b])
+        starts = [np.array([0.31]), np.array([0.31])]
+        cpu = CpuMCA(f_max=40.0, top=5).calc(*args, starts)
+        gpu = CudaMCA(f_max=40.0, top=5).calc(*args, starts)
+        np.testing.assert_array_equal(cpu[0, :2], [0, 0])
+        np.testing.assert_array_equal(gpu[0, :2], [0, 0])
+        assert np.all(np.isnan(cpu[0, 2:])) and np.all(np.isnan(gpu[0, 2:]))
+        assert np.isfinite(cpu[1, 2]) and np.isfinite(gpu[1, 2])

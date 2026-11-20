@@ -257,6 +257,19 @@ if CUDA is not None and HAS_CYTHON:
                 "nvcc": nvcc_flags,
             },
         ),
+        Extension(
+            "periodfind.mca",
+            sources=["periodfind/cuda/mca.cu", "periodfind/mca.pyx"],
+            language="c++",
+            libraries=["cudart"],
+            library_dirs=[CUDA["lib64"]],
+            runtime_library_dirs=[CUDA["lib64"]],
+            include_dirs=[numpy_include, CUDA["include"]],
+            extra_compile_args={
+                "gcc": gcc_flags,
+                "nvcc": nvcc_flags,
+            },
+        ),
     ]
     cmdclass = {"build_ext": custom_build_ext}
 else:

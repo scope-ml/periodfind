@@ -19,6 +19,7 @@ from periodfind_cpu import (
     calc_fpw_peaks_batched,
     calc_ls_batched,
     calc_ls_peaks_batched,
+    calc_mca_batched,
     calc_mf_batched,
     calc_mf_features_batched,
     calc_mf_peaks_batched,
@@ -1583,4 +1584,105 @@ class EllipsoidalFit:
         return calc_ellipsoidal_batched(
             t_list, m_list, e_list, b_list, p_list, self.n_band, self.n_t0,
             self.double_periods, int(min_points), self.weighting == "fvu",
+        )
+
+
+class MultiCriterionAscent:
+    """Multi-criterion ascent (MCA) period finder (CPU backend).
+
+    For sparse multi-night, multiband light curves. Each candidate period (for
+    example the peaks of other periodograms) starts a walker that climbs one
+    score: the sum of four terms, each z-scored over 2048 evenly spaced
+    frequencies of the object's own grid, signed so that larger is better:
+
+    - ``power``: explained variance of a two-harmonic shape shared by all bands
+      with a free gain per band (robust point weights from one bootstrap fit);
+    - ``sigma``: residual scale of a robust shared-shape harmonic fit (minimised);
+    - ``pdm``: phase dispersion of rank-normalised magnitudes with von Mises
+      phase weights (minimised);
+    - ``loo``: error predicting each night from a fit to the other nights
+      (minimised), which targets daily aliases.
+
+    Walkers move by Newton-like steps from finite differences, with
+    backtracking, in units of one peak width (1 / time span); walkers that end
+    within half a peak width of a higher one are merged. Photometric errors are
+    not used.
+
+    Parameters
+    ----------
+    f_max : float, default=288.0
+        Highest frequency in cycles per day (288 = 5 minutes).
+    oversample : int, default=5
+        Grid points per peak width for the bootstrap and the term scaling.
+    tol : float, default=1e-3
+        A walker stops when its step is below ``tol`` peak widths.
+    max_iter : int, default=10000
+        Maximum steps per walker.
+    top : int, default=50
+        Number of optima returned per light curve.
+    """
+
+    def __init__(self, f_max=288.0, oversample=5, tol=1e-3, max_iter=10000, top=50):
+        if not (np.isfinite(f_max) and f_max > 0):
+            raise ValueError(f"f_max must be positive, got {f_max}")
+        if oversample < 1 or tol <= 0 or max_iter < 1 or top < 1:
+            raise ValueError("oversample >= 1, tol > 0, max_iter >= 1 and top >= 1 are required")
+        self.f_max = float(f_max)
+        self.oversample = float(oversample)
+        self.tol = float(tol)
+        self.max_iter = int(max_iter)
+        self.top = int(top)
+
+    @property
+    def columns(self):
+        """Names of the output columns."""
+        return (
+            ["n_starts", "n_optima"]
+            + [f"period_{k}" for k in range(1, self.top + 1)]
+            + [f"score_{k}" for k in range(1, self.top + 1)]
+        )
+
+    def calc(self, times, mags, bands, periods):
+        """Search every light curve from its own candidate periods.
+
+        Parameters
+        ----------
+        times, mags : list of ndarray
+            One array per light curve, in days and magnitudes.
+        bands : list of ndarray
+            Band index per point, 0 to 5.
+        periods : list of ndarray
+            Candidate periods for that curve, in days; exact duplicates are merged.
+
+        Returns
+        -------
+        ndarray, shape (n_curves, 2 + 2 * top)
+            ``n_starts, n_optima``, then the ``top`` best periods (best first) and
+            their scores; ``columns`` names them. Missing entries are NaN.
+        """
+        n = len(times)
+        if not (len(mags) == n and len(bands) == n and len(periods) == n):
+            raise ValueError("times, mags, bands and periods must be the same length")
+        t_list, m_list, b_list, p_list = [], [], [], []
+        for i in range(n):
+            t = np.ascontiguousarray(times[i], dtype=np.float64)
+            m = np.ascontiguousarray(mags[i], dtype=np.float64)
+            b = np.ascontiguousarray(bands[i], dtype=np.uint8)
+            p = np.ascontiguousarray(np.atleast_1d(periods[i]), dtype=np.float64)
+            if not (t.size == m.size == b.size):
+                raise ValueError(f"curve {i}: times, mags and bands differ in length")
+            t_list.append(t)
+            m_list.append(m)
+            b_list.append(b)
+            p_list.append(p)
+        return calc_mca_batched(
+            t_list,
+            m_list,
+            b_list,
+            p_list,
+            self.f_max,
+            self.oversample,
+            self.tol,
+            self.max_iter,
+            self.top,
         )

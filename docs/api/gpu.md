@@ -15,6 +15,7 @@ The GPU module re-exports four classes compiled from Cython/CUDA:
 - `periodfind.gpu.AOV`
 - `periodfind.gpu.LombScargle`
 - `periodfind.gpu.FPW`
+- `periodfind.gpu.MultiCriterionAscent`
 
 These have the **same interface** as the [CPU backend classes](cpu.md).
 Constructors accept the same parameters, and the `.calc()` method has an

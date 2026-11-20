@@ -13,6 +13,9 @@ A collection of CUDA-accelerated periodicity detection algorithms, with both C++
 | Lomb-Scargle | `periodfind.LombScargle` | `periodfind.gpu.LombScargle` | `periodfind.cpu.LombScargle` |
 | Fast Phase-folding Weighted | `periodfind.FPW` | `periodfind.gpu.FPW` | `periodfind.cpu.FPW` |
 | Box Least Squares | `periodfind.BoxLeastSquares` | `periodfind.gpu.BoxLeastSquares` | `periodfind.cpu.BoxLeastSquares` |
+| Multi-Criterion Ascent | `periodfind.MultiCriterionAscent` | `periodfind.gpu.MultiCriterionAscent` | `periodfind.cpu.MultiCriterionAscent` |
+
+Multi-criterion ascent (MCA) refines candidate periods, for example the top peaks of the periodograms above, for sparse multi-night, multiband light curves. Each candidate starts a walker that climbs one score, the sum of four z-scored terms (two-harmonic power, robust residual scale, kernel phase dispersion and leave-one-night-out prediction error), and the optima are returned by score. See `docs/user-guide/mca.md`.
 
 ### Template Fitting
 
